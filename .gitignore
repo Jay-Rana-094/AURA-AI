@@ -1,0 +1,10 @@
+# AURA AI — never commit these.
+# Models are huge (up to 1 GB) and downloaded separately per PC.
+models/
+# Personal data: your notes, todos, reminders and custom phrases.
+*.db
+custom_commands.json
+aura-speech.log
+# Python caches.
+__pycache__/
+*.pyc

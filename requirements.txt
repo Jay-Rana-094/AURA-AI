@@ -1,0 +1,13 @@
+# AURA AI — Phase 1 dependencies (Windows PC, Python 3.10+)
+# Install with: pip install -r requirements.txt
+
+SpeechRecognition==3.14.1   # Google speech recognition fallback + mic handling
+vosk==0.3.45                 # Offline speech recognition (needs a model, see README)
+pyttsx3==2.99                # Offline text-to-speech
+PyAudio==0.2.14              # Microphone access (Windows wheels available on PyPI)
+requests==2.32.3             # Used by later phases (web info); harmless in phase 1
+
+# NOTE: tkinter ships with standard Python on Windows — no install needed.
+# NOTE: Vosk also needs a model file (not on PyPI). Download the small
+# English model and extract it to models/vosk-model-small-en-us-0.15
+# https://alphacephei.com/vosk/models
