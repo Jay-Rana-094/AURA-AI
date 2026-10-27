@@ -1,16 +1,23 @@
-"""AURA AI — Phase 4 entry point (with wake word + memory + custom).
+"""AURA AI — Phase 5 entry point (with custom wake word + memory + custom).
 
 Two ways to talk to AURA:
   - Tap the mic button: one command, as before.
   - Tap the 👂 button: wake-word mode. AURA listens continuously
-    (offline Vosk only — audio never leaves the PC) for "Aura".
-    Say "Aura", then your command; afterwards it goes back to
-    waiting for the wake word. Tap 👂 again to switch it off.
+    (offline Vosk only — audio never leaves the PC) for the wake
+    word (default "Aura"; say "change my wake word to..." to pick
+    another). Say the wake word, then your command; afterwards it
+    goes back to waiting. Tap 👂 again to switch it off.
 
 One mic lock serializes the wake stream and command listens so they
 never fight over the microphone. Voice work always runs on worker
 threads so the pill never freezes, and every turn ends in
 try/finally so the pill always returns to a usable state.
+
+Phase 5 barge-in: while AURA speaks, say the wake word (or tap the
+mic) to cut it off and give a new command. Voice barging listens
+with the offline engine only, and it is skipped for replies that
+contain the wake word themselves — otherwise AURA's own speech
+would trigger it.
 
 Run with: python main.py  (or run.bat on Windows)
 """
@@ -24,6 +31,8 @@ from aura.gui import IslandGUI
 from aura.listener import Listener
 from aura.models import MODEL_CANDIDATES, pick_model_dir
 from aura.speaker import Speaker
+from aura.wake_settings import display_wake_word, load_wake_word
+from aura.wakeword import contains_wake_word
 
 
 def main():
@@ -38,27 +47,89 @@ def main():
     wake_enabled = {"on": False}
     wake_stop = threading.Event()
     turn_active = threading.Event()
+    # Turn generations: a mic tap during speech starts a newer turn,
+    # and only the newest turn may reset the pill state or clear
+    # turn_active when it finishes.
+    turn_gen = {"n": 0}
+
+    def _wake_prompt():
+        """Pill text for wake mode, using the current custom word."""
+        return f"Say '{display_wake_word(load_wake_word())}'..."
+
+    def _speak_with_barge(reply: str) -> bool:
+        """Speak ``reply``, listening for the wake word meanwhile.
+
+        Returns True if the user barged in by voice. The speech runs
+        on its own thread; the wake-word wait ends when speech ends
+        (its stop event) or when the word is heard. Voice barging is
+        skipped for replies that contain the wake word themselves,
+        and for a missing Vosk model (the wait then returns at once
+        and speech simply plays out).
+        """
+        speech_done = threading.Event()
+
+        def _say():
+            try:
+                speaker.say(reply)
+            finally:
+                speech_done.set()
+
+        say_thread = threading.Thread(target=_say, daemon=True)
+        say_thread.start()
+        word = load_wake_word()
+        if contains_wake_word(reply, word):
+            say_thread.join()
+            return False
+        with mic_lock:
+            detected, _ = listener.wait_for_wake_word(
+                speech_done, wake_word=word
+            )
+        if detected:
+            speaker.stop()
+            say_thread.join()
+            return True
+        say_thread.join()
+        return False
 
     def _voice_turn():
-        """One listen -> brain -> speak turn. Runs on a worker thread."""
+        """Listen -> brain -> speak, looping on a voice barge-in.
+
+        If the user says the wake word while AURA speaks, speech
+        stops and the turn loops back to listen for the follow-up
+        command. Runs on a worker thread.
+        """
         gui = gui_ref["gui"]
+        turn_gen["n"] += 1
+        my_gen = turn_gen["n"]
         turn_active.set()
         try:
-            gui.set_state("listening", "Listening...")
-            with mic_lock:
-                text, error = listener.listen(timeout=8.0)
-            if error:
-                gui.set_state("error", error)
-                gui.show_transcript("")
-                return
-            gui.show_transcript(f"You: {text}")
-            gui.set_state("thinking", "Thinking...")
-            reply, should_quit = handle(text)
-            gui.show_transcript(f"AURA: {reply}")
-            gui.set_state("speaking", "Speaking...")
-            speaker.say(reply)
-            if should_quit:
-                gui.close()
+            while True:
+                gui.set_state("listening", "Listening...")
+                with mic_lock:
+                    text, error = listener.listen(timeout=8.0)
+                if error:
+                    gui.set_state("error", error)
+                    gui.show_transcript("")
+                    return
+                gui.show_transcript(f"You: {text}")
+                gui.set_state("thinking", "Thinking...")
+                reply, should_quit = handle(text)
+                # Conversation history (Phase 5): record the turn.
+                # Never allowed to break the turn itself.
+                try:
+                    get_memory().add_turn(text, reply)
+                except Exception:  # noqa: BLE001, S110 - history is best effort
+                    pass
+                gui.show_transcript(f"AURA: {reply}")
+                gui.set_state("speaking", "Speaking...")
+                barged = _speak_with_barge(reply)
+                if barged:
+                    # Cut in mid-sentence: the user wants something
+                    # else, so listen for it instead of quitting.
+                    continue
+                if should_quit:
+                    gui.close()
+                    return
                 return
         except Exception as exc:  # noqa: BLE001 - keep the pill alive
             try:
@@ -67,29 +138,33 @@ def main():
                 pass
             return
         finally:
-            # Never leave the pill stuck: wake mode re-arms itself,
-            # manual mode returns to idle.
-            turn_active.clear()
-            try:
-                if wake_enabled["on"]:
-                    gui.set_state("wake", "Say 'Aura'...")
-                else:
-                    gui.set_state("idle", "AURA — tap the mic and speak")
-            except Exception:  # noqa: BLE001, S110 - window may be closed
-                pass
+            # Never leave the pill stuck — but only the newest turn
+            # may reset state, so a mic-tap barge is not clobbered
+            # by the older turn finishing behind it.
+            if my_gen == turn_gen["n"]:
+                turn_active.clear()
+                try:
+                    if wake_enabled["on"]:
+                        gui.set_state("wake", _wake_prompt())
+                    else:
+                        gui.set_state("idle", "AURA — tap the mic and speak")
+                except Exception:  # noqa: BLE001, S110 - window may be closed
+                    pass
 
     def on_mic():
         # Tapping the mic takes manual control: stop wake mode first
-        # so its stream releases the mic, then run one turn.
+        # so its stream releases the mic, cut off any speech in
+        # progress (mic-button barge-in), then run one turn.
         if wake_enabled["on"]:
             set_wake(False)
+        speaker.stop()
         threading.Thread(target=_voice_turn, daemon=True).start()
 
     def on_engine_change(engine: str):
         listener.set_engine(engine)
         gui = gui_ref["gui"]
         if wake_enabled["on"]:
-            gui.set_state("wake", "Say 'Aura'...")
+            gui.set_state("wake", _wake_prompt())
         else:
             gui.set_state("idle", f"Engine: {engine} — tap the mic and speak")
 
@@ -112,11 +187,13 @@ def main():
                 time.sleep(0.2)
                 continue
             try:
-                gui.set_state("wake", "Say 'Aura'...")
+                gui.set_state("wake", _wake_prompt())
             except Exception:  # noqa: BLE001, S110 - window closed
                 return
             with mic_lock:
-                detected, error = listener.wait_for_wake_word(wake_stop)
+                detected, error = listener.wait_for_wake_word(
+                    wake_stop, wake_word=load_wake_word()
+                )
             if error:
                 # e.g. Vosk model missing: wake mode cannot work.
                 try:
@@ -147,7 +224,7 @@ def main():
                         get_memory().mark_notified(row["id"])
                         try:
                             if wake_enabled["on"]:
-                                gui.set_state("wake", "Say 'Aura'...")
+                                gui.set_state("wake", _wake_prompt())
                             else:
                                 gui.set_state(
                                     "idle", "AURA — tap the mic and speak"

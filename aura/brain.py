@@ -23,7 +23,18 @@ from aura.commands.memory_cmds import (
     execute_memory_command,
     parse_memory_command,
 )
+from aura.commands.history_cmds import (
+    execute_history_command,
+    parse_history_command,
+)
 from aura.memory import Memory
+from aura.wake_settings import (
+    DEFAULT_WAKE_WORD,
+    display_wake_word,
+    load_wake_word,
+    save_wake_word,
+    validate_wake_word,
+)
 
 _YES = {"yes", "yeah", "yep", "yup", "confirm", "sure", "do it", "go ahead"}
 _NO = {"no", "nope", "cancel", "never mind", "nevermind", "stop", "don't"}
@@ -69,6 +80,35 @@ def _today() -> str:
     return datetime.now().strftime("%A, %B %d, %Y")
 
 
+def handle_wake_word_command(cleaned: str):
+    """Wake-word voice commands (Phase 5). Returns a reply, or None
+    if this turn is not a wake-word command. The word is stored in
+    aura_settings.json, so the wake loop picks it up on its next
+    listen cycle and the pill shows it right away."""
+    match = re.match(r"(change|set)( my| the)? wake word to (.+)$", cleaned)
+    if match:
+        phrase = match.group(3).strip().rstrip(".!?")
+        reason = validate_wake_word(phrase)
+        if reason is not None:
+            return reason
+        save_wake_word(phrase)
+        shown = display_wake_word(phrase)
+        return f"Wake word changed to '{shown}'. Say '{shown}' to wake me."
+    if cleaned in ("reset wake word", "reset my wake word"):
+        save_wake_word(DEFAULT_WAKE_WORD)
+        return "Wake word reset to 'Aura'."
+    if cleaned in (
+        "what is my wake word",
+        "what is the wake word",
+        "what's my wake word",
+    ):
+        return (
+            f"Your wake word is "
+            f"'{display_wake_word(load_wake_word())}'."
+        )
+    return None
+
+
 def handle(text: str, _from_custom: bool = False):
     global _pending
     cleaned = text.strip().lower()
@@ -82,6 +122,11 @@ def handle(text: str, _from_custom: bool = False):
         if cleaned in _YES or cleaned.startswith("yes"):
             return execute_command(cmd), False
         return "Okay, cancelled.", False
+
+    # 1b. Wake-word commands (Phase 5): change / reset / ask.
+    wake_reply = handle_wake_word_command(cleaned)
+    if wake_reply is not None:
+        return wake_reply, False
 
     # 2. Custom-command management (teach / list / forget).
     mgmt = parse_custom_management(cleaned)
@@ -101,6 +146,11 @@ def handle(text: str, _from_custom: bool = False):
     if mem_cmd is not None:
         return execute_memory_command(mem_cmd, get_memory()), False
 
+    # 4b. Conversation-history questions (Phase 5).
+    hist_cmd = parse_history_command(cleaned)
+    if hist_cmd is not None:
+        return execute_history_command(hist_cmd, get_memory()), False
+
     # 5. Command packs.
     cmd = parse_command(cleaned)
     if cmd is not None:
@@ -118,7 +168,10 @@ def handle(text: str, _from_custom: bool = False):
             "I can open apps and websites, search Google and YouTube, "
             "control volume and media, lock or power your PC, remember "
             "notes, keep todos, set reminders, and run your custom "
-            "commands. Say 'list my custom commands' to see those."
+            "commands. Say 'list my custom commands' to see those. "
+            "You can also say 'change my wake word to...' to pick a "
+            "new wake word, or 'what did we talk about' to hear our "
+            "recent conversation."
         ), False
     if re.search(r"\b(hello|hi|hey)\b", cleaned):
         return "Hey! I'm AURA, your assistant. What can I do for you?", False

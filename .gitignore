@@ -4,6 +4,7 @@ models/
 # Personal data: your notes, todos, reminders and custom phrases.
 *.db
 custom_commands.json
+aura_settings.json
 aura-speech.log
 # Python caches.
 __pycache__/
