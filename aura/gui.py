@@ -24,11 +24,14 @@ Interface (unchanged from the classic pill, so main.py needs no edits):
     set_state(state, status)   # idle/listening/thinking/speaking/error/wake
     show_transcript(text)
     set_wake_active(active)
+    set_theme(name)            # recolor the pill (Phase 6)
     run() / close()
 """
 
 import random
 import tkinter as tk
+
+from aura.theme import THEMES, load_theme_name
 
 
 def _display_scale():
@@ -118,6 +121,11 @@ class IslandGUI:
         self._state = "idle"
         self._busy = False
         self._animating = False
+        # Theme (Phase 6): the saved theme, or violet (the original
+        # glow pill) if none was ever chosen.
+        self._theme_name = load_theme_name()
+        self._theme = THEMES[self._theme_name]
+        t = self._theme
 
         self.root = tk.Tk()
         self.root.title("AURA")
@@ -136,32 +144,39 @@ class IslandGUI:
         self.canvas.pack(fill="both", expand=True)
 
         # Neon glow: layered rounded rects behind the pill, fading out.
-        _rounded_rect(self.canvas, 0, 0, PILL_WIDTH, PILL_HEIGHT, _px(40),
-                      fill="#12083a", outline="")
-        _rounded_rect(self.canvas, _px(4), _px(4),
-                      PILL_WIDTH - _px(4), PILL_HEIGHT - _px(4), _px(36),
-                      fill="#1b0f4d", outline="")
-        _rounded_rect(self.canvas, _px(8), _px(8),
-                      PILL_WIDTH - _px(8), PILL_HEIGHT - _px(8), _px(32),
-                      fill="#241a66", outline="")
+        # Ids are kept so set_theme() can recolor them (Phase 6).
+        self.glow_ids = [
+            _rounded_rect(self.canvas, 0, 0, PILL_WIDTH, PILL_HEIGHT, _px(40),
+                          fill=t["glow"][0], outline=""),
+            _rounded_rect(self.canvas, _px(4), _px(4),
+                          PILL_WIDTH - _px(4), PILL_HEIGHT - _px(4), _px(36),
+                          fill=t["glow"][1], outline=""),
+            _rounded_rect(self.canvas, _px(8), _px(8),
+                          PILL_WIDTH - _px(8), PILL_HEIGHT - _px(8), _px(32),
+                          fill=t["glow"][2], outline=""),
+        ]
         # The pill itself + a bright top highlight line.
-        _rounded_rect(self.canvas, _px(12), _px(12),
-                      PILL_WIDTH - _px(12), PILL_HEIGHT - _px(12), _px(30),
-                      fill="#0b0b1e", outline="#5b8cff", width=_px(2))
-        self.canvas.create_line(_px(40), _px(13), PILL_WIDTH - _px(40), _px(13),
-                                fill="#6ea8ff", width=max(1, _px(1)))
+        self.pill_id = _rounded_rect(
+            self.canvas, _px(12), _px(12),
+            PILL_WIDTH - _px(12), PILL_HEIGHT - _px(12), _px(30),
+            fill="#0b0b1e", outline=t["pill_outline"], width=_px(2))
+        self.highlight_id = self.canvas.create_line(
+            _px(40), _px(13), PILL_WIDTH - _px(40), _px(13),
+            fill=t["highlight"], width=max(1, _px(1)))
 
         # Waveform orb (left). Concentric circles + 5 animated bars.
         cx, cy, r = _px(44), _px(42), _px(24)
         self.orb_outer = self.canvas.create_oval(
             cx - r, cy - r, cx + r, cy + r,
-            fill="#12082b", outline=ORB_RING["idle"], width=_px(2))
-        self.canvas.create_oval(
+            fill=t["orb_fill"], outline=t["ring_idle"], width=_px(2))
+        self.orb_inner_id = self.canvas.create_oval(
             cx - r + _px(6), cy - r + _px(6), cx + r - _px(6), cy + r - _px(6),
-            fill="#2b1666", outline="")
+            fill=t["orb_inner"], outline="")
         self.bar_ids = []
         bar_x = [cx - _px(16), cx - _px(8), cx, cx + _px(8), cx + _px(16)]
-        for bx, h, color in zip(bar_x, BAR_BASE, BAR_COLORS):
+        for bx, h, color in zip(
+                bar_x, BAR_BASE,
+                [t["bars"][i % 2] for i in range(len(BAR_BASE))]):
             self.bar_ids.append(self.canvas.create_line(
                 bx, cy - h // 2, bx, cy + h // 2, fill=color, width=_px(4),
                 capstyle="round"))
@@ -169,9 +184,9 @@ class IslandGUI:
         # Labels + status/transcript text.
         # (Font sizes stay unscaled: tkinter scales point sizes itself
         # once the app is DPI-aware.)
-        self.canvas.create_text(
+        self.label_id = self.canvas.create_text(
             _px(88), _px(20), anchor="w", text="AURA",
-            fill=LABEL, font=("Segoe UI", 10, "bold"))
+            fill=t["label"], font=("Segoe UI", 10, "bold"))
         self.status_text = self.canvas.create_text(
             _px(88), _px(40), anchor="w",
             text="Hey Jay... how can I help you today?",
@@ -186,7 +201,7 @@ class IslandGUI:
             self.root, self.engine_var, "offline", "google",
             command=self._engine_changed)
         self.engine_menu.configure(
-            bg="#141438", fg=LABEL, activebackground="#1e1e5e",
+            bg=t["control"], fg=t["label"], activebackground="#1e1e5e",
             relief="flat", bd=0, font=("Segoe UI", 8), highlightthickness=0)
         self.engine_menu.place(x=_px(440), y=_px(58),
                                width=_px(88), height=_px(16))
@@ -194,7 +209,7 @@ class IslandGUI:
         # Circular mic button (right).
         self.mic_circle = self.canvas.create_oval(
             _px(561), _px(23), _px(599), _px(61),
-            fill="#141438", outline="#35a0ff", width=_px(2))
+            fill=t["control"], outline=t["accent"], width=_px(2))
         self.mic_glyph = self.canvas.create_text(
             _px(580), _px(42), text="\U0001f3a4", fill="white",
             font=("Segoe UI", 14))
@@ -209,7 +224,7 @@ class IslandGUI:
         # Wake ring (far right): glowing ring + centre dot when on.
         self.wake_ring = self.canvas.create_oval(
             _px(631), _px(25), _px(665), _px(59),
-            fill="#141438", outline="#444444", width=_px(3))
+            fill=t["control"], outline="#444444", width=_px(3))
         self.wake_dot = self.canvas.create_oval(
             _px(643), _px(37), _px(653), _px(47), fill="#444444", outline="")
         self.canvas.tag_bind(self.wake_ring, "<Button-1>", self._wake_pressed)
@@ -265,6 +280,58 @@ class IslandGUI:
         self.root.geometry(f"+{x}+{y}")
 
     # -- state updates (safe to call from worker threads via after()) -------
+    def _dot_colors(self):
+        """State dots: meaning colours fixed, speaking follows the theme."""
+        colors = dict(DOT_COLORS)
+        colors["speaking"] = self._theme["accent"]
+        return colors
+
+    def _orb_ring(self):
+        """Orb ring: meaning colours fixed, idle/speaking follow the theme."""
+        ring = dict(ORB_RING)
+        ring["idle"] = self._theme["ring_idle"]
+        ring["speaking"] = self._theme["accent"]
+        return ring
+
+    def current_theme(self):
+        """The theme the pill is currently drawn in."""
+        return self._theme_name
+
+    def set_theme(self, name: str):
+        """Recolor the pill to a named theme. Thread-safe; a no-op
+        when the name is unknown or already active."""
+        if name not in THEMES or name == self._theme_name:
+            return
+
+        def _apply():
+            self._theme_name = name
+            t = THEMES[name]
+            self._theme = t
+            for glow_id, color in zip(self.glow_ids, t["glow"]):
+                self.canvas.itemconfig(glow_id, fill=color)
+            self.canvas.itemconfig(self.pill_id, outline=t["pill_outline"])
+            self.canvas.itemconfig(self.highlight_id, fill=t["highlight"])
+            self.canvas.itemconfig(self.orb_outer, fill=t["orb_fill"])
+            self.canvas.itemconfig(self.orb_inner_id, fill=t["orb_inner"])
+            for bar_id, color in zip(
+                    self.bar_ids,
+                    [t["bars"][i % 2] for i in range(len(self.bar_ids))]):
+                self.canvas.itemconfig(bar_id, fill=color)
+            self.canvas.itemconfig(self.label_id, fill=t["label"])
+            self.engine_menu.configure(bg=t["control"], fg=t["label"])
+            self.canvas.itemconfig(self.mic_circle, fill=t["control"])
+            self.canvas.itemconfig(self.wake_ring, fill=t["control"])
+            # Re-apply state-dependent colours for the current state.
+            self.canvas.itemconfig(
+                self.dot, fill=self._dot_colors()[self._state])
+            self.canvas.itemconfig(
+                self.orb_outer, outline=self._orb_ring()[self._state])
+            self.canvas.itemconfig(
+                self.mic_circle,
+                outline="#444444" if self._busy else t["accent"])
+
+        self.root.after(0, _apply)
+
     def set_state(self, state: str, status: str):
         """state: idle/listening/thinking/speaking/error/wake.
         "wake" is NOT busy: the mic button stays usable while AURA
@@ -272,14 +339,16 @@ class IslandGUI:
         def _apply():
             self._state = state
             self.canvas.itemconfig(
-                self.dot, fill=DOT_COLORS.get(state, DOT_COLORS["idle"]))
+                self.dot, fill=self._dot_colors().get(
+                    state, DOT_COLORS["idle"]))
             self.canvas.itemconfig(
-                self.orb_outer, outline=ORB_RING.get(state, ORB_RING["idle"]))
+                self.orb_outer, outline=self._orb_ring().get(
+                    state, ORB_RING["idle"]))
             self.canvas.itemconfig(self.status_text, text=status)
             self._busy = state in ("listening", "thinking", "speaking")
             self.canvas.itemconfig(
                 self.mic_circle,
-                outline="#444444" if self._busy else "#35a0ff")
+                outline="#444444" if self._busy else self._theme["accent"])
             if state in ("listening", "speaking") and not self._animating:
                 self._animating = True
                 self._animate_wave()

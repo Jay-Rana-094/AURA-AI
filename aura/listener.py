@@ -18,13 +18,16 @@ import queue
 
 import speech_recognition as sr
 
-from aura.models import pick_model_dir
+from aura.models import HINDI_MODEL_CANDIDATES, pick_model_dir
 from aura.wakeword import contains_wake_word
 
 
 class Listener:
-    def __init__(self, engine: str = "offline"):
+    def __init__(self, engine: str = "offline", language: str = "en"):
         self.engine = engine  # "offline" or "google"
+        # Phase 7: "en" or "hi". Changing it drops the loaded Vosk
+        # model so the next listen loads the right language's model.
+        self.language = language if language in ("en", "hi") else "en"
         self._recognizer = sr.Recognizer()
         self._vosk_model = None
         self._vosk_error = None
@@ -33,6 +36,13 @@ class Listener:
     def set_engine(self, engine: str) -> None:
         if engine in ("offline", "google"):
             self.engine = engine
+
+    def set_language(self, language: str) -> None:
+        """Switch listening language, reloading the Vosk model."""
+        if language in ("en", "hi") and language != self.language:
+            self.language = language
+            self._vosk_model = None
+            self._vosk_error = None
 
     # -- Vosk setup (lazy: only loaded when the offline engine is used) ---
     def _load_vosk(self) -> bool:
@@ -43,15 +53,28 @@ class Listener:
         try:
             from vosk import Model
 
-            model_dir = pick_model_dir()
+            candidates = (
+                HINDI_MODEL_CANDIDATES
+                if self.language == "hi"
+                else None
+            )
+            model_dir = pick_model_dir(candidates)
             if model_dir is None:
-                self._vosk_error = (
-                    "No Vosk model found in the models folder. Download "
-                    "vosk-model-small-en-in-0.4 (Indian English, recommended) "
-                    "or vosk-model-small-en-us-0.15 from "
-                    "alphacephei.com/vosk/models and extract it into the "
-                    "models folder, or switch to the Google engine."
-                )
+                if self.language == "hi":
+                    self._vosk_error = (
+                        "No Hindi Vosk model found in the models folder. "
+                        "Download vosk-model-small-hi-0.22 from "
+                        "alphacephei.com/vosk/models and extract it into "
+                        "the models folder, or switch to the Google engine."
+                    )
+                else:
+                    self._vosk_error = (
+                        "No Vosk model found in the models folder. Download "
+                        "vosk-model-small-en-in-0.4 (Indian English, recommended) "
+                        "or vosk-model-small-en-us-0.15 from "
+                        "alphacephei.com/vosk/models and extract it into the "
+                        "models folder, or switch to the Google engine."
+                    )
                 return False
             self._vosk_model = Model(model_dir)
             return True
@@ -136,8 +159,10 @@ class Listener:
                 self._recognizer.adjust_for_ambient_noise(source, duration=0.5)
                 audio = self._recognizer.listen(source, timeout=timeout)
             # en-IN: Google's Indian English model — far better for
-            # Indian accents than the default en-US setting.
-            text = self._recognizer.recognize_google(audio, language="en-IN")
+            # Indian accents than the default en-US setting. hi-IN
+            # when the language mode is Hindi (Phase 7).
+            lang = "hi-IN" if self.language == "hi" else "en-IN"
+            text = self._recognizer.recognize_google(audio, language=lang)
             return text, ""
         except sr.WaitTimeoutError:
             return "", "I didn't hear anything. Try again."

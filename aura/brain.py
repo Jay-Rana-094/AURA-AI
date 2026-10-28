@@ -27,7 +27,31 @@ from aura.commands.history_cmds import (
     execute_history_command,
     parse_history_command,
 )
+from aura.commands.briefing import build_briefing, parse_briefing_command
+from aura.commands.clipboard_cmds import (
+    execute_clipboard_command,
+    parse_clipboard_command,
+)
+from aura.commands.file_cmds import (
+    execute_file_command,
+    parse_file_command,
+)
+from aura.commands.hindi_cmds import (
+    execute_hindi_command,
+    parse_hindi_command,
+    parse_language_command,
+)
+from aura.commands.notify_cmds import (
+    execute_notification_command,
+    parse_notification_command,
+)
+from aura.commands.theme_cmds import (
+    execute_theme_command,
+    parse_theme_command,
+)
+from aura.language import load_language, save_language
 from aura.memory import Memory
+from aura.speaker import has_hindi_voice
 from aura.wake_settings import (
     DEFAULT_WAKE_WORD,
     display_wake_word,
@@ -123,7 +147,37 @@ def handle(text: str, _from_custom: bool = False):
             return execute_command(cmd), False
         return "Okay, cancelled.", False
 
-    # 1b. Wake-word commands (Phase 5): change / reset / ask.
+    # 1b. Language switch (Phase 7): works in both modes, before
+    # everything else except a pending confirmation. Switching to
+    # Hindi needs an installed Hindi voice — without one, Hindi
+    # text would be read aloud by an English voice.
+    lang_cmd = parse_language_command(cleaned)
+    if lang_cmd is not None:
+        if lang_cmd["language"] == "hi":
+            if not has_hindi_voice():
+                return (
+                    "I couldn't switch to Hindi — no Hindi voice is "
+                    "installed on this PC yet. Install the Hindi "
+                    "language pack or a Hindi speech voice in Windows "
+                    "Settings, then say 'speak Hindi' again.",
+                    False,
+                )
+            save_language("hi")
+            return "Hinglish mode on hai. Ab Hinglish mein baat hogi.", False
+        save_language("en")
+        return "Switching to English.", False
+
+    # 1c. Hindi pack (Phase 7): in Hindi mode, Hindi commands are
+    # tried before the English packs. Anything unmatched falls
+    # through to the English packs below (their replies stay in
+    # English — a known v1 limitation).
+    if load_language() == "hi":
+        hindi_cmd = parse_hindi_command(cleaned)
+        if hindi_cmd is not None:
+            reply = execute_hindi_command(hindi_cmd, get_memory())
+            return reply, hindi_cmd["kind"] == "goodbye"
+
+    # 1d. Wake-word commands (Phase 5): change / reset / ask.
     wake_reply = handle_wake_word_command(cleaned)
     if wake_reply is not None:
         return wake_reply, False
@@ -151,6 +205,35 @@ def handle(text: str, _from_custom: bool = False):
     if hist_cmd is not None:
         return execute_history_command(hist_cmd, get_memory()), False
 
+    # 4c. Daily briefing (Phase 6). Routed before the command packs
+    # and the built-ins, so "what do I have today" briefs instead
+    # of answering with just the date.
+    if parse_briefing_command(cleaned) is not None:
+        return build_briefing(get_memory()), False
+
+    # 4d. Pill theme changes (Phase 6). The executor only persists
+    # the choice; main.py recolors the pill in the same turn.
+    theme_cmd = parse_theme_command(cleaned)
+    if theme_cmd is not None:
+        return execute_theme_command(theme_cmd), False
+
+    # 4e. Clipboard control (Phase 6).
+    clip_cmd = parse_clipboard_command(cleaned)
+    if clip_cmd is not None:
+        return execute_clipboard_command(clip_cmd, get_memory()), False
+
+    # 4f. Notification center (Phase 6).
+    notify_cmd = parse_notification_command(cleaned)
+    if notify_cmd is not None:
+        return execute_notification_command(notify_cmd, get_memory()), False
+
+    # 4g. File search (Phase 6). Routed before the command packs
+    # so "open file resume" searches instead of hitting the app
+    # opener (which only knows allow-listed apps).
+    file_cmd = parse_file_command(cleaned)
+    if file_cmd is not None:
+        return execute_file_command(file_cmd), False
+
     # 5. Command packs.
     cmd = parse_command(cleaned)
     if cmd is not None:
@@ -171,7 +254,15 @@ def handle(text: str, _from_custom: bool = False):
             "commands. Say 'list my custom commands' to see those. "
             "You can also say 'change my wake word to...' to pick a "
             "new wake word, or 'what did we talk about' to hear our "
-            "recent conversation."
+            "recent conversation. I can also take screenshots and "
+            "switch Bluetooth, Wi-Fi, and airplane mode. Say 'daily "
+            "briefing' for a summary of your day, 'change theme "
+            "to emerald' to recolor the pill, 'what's on my "
+            "clipboard' to hear what's copied, 'what "
+            "notifications do I have' to catch up on reminders "
+            "that fired, or 'find my report file' to search "
+            "Documents, Downloads and Desktop. Say 'speak Hindi' "
+            "to switch to Hindi."
         ), False
     if re.search(r"\b(hello|hi|hey)\b", cleaned):
         return "Hey! I'm AURA, your assistant. What can I do for you?", False

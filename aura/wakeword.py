@@ -8,5 +8,15 @@ import re
 
 
 def contains_wake_word(text: str, wake_word: str = "aura") -> bool:
-    """True if ``wake_word`` appears as a whole word in ``text``."""
-    return re.search(rf"\b{re.escape(wake_word)}\b", text.lower()) is not None
+    """True if ``wake_word`` appears as a whole word in ``text``.
+
+    Phase 7: Hindi transcripts render the name as Devanagari, so
+    the default word also matches "ऑरा" (substring match — word
+    boundaries are unreliable across scripts).
+    """
+    lowered = text.lower()
+    if re.search(rf"\b{re.escape(wake_word)}\b", lowered) is not None:
+        return True
+    if wake_word == "aura" and "ऑरा" in text:
+        return True
+    return False

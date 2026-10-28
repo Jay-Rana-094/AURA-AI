@@ -8,6 +8,10 @@ AURA uses whichever model folder is present in ``models/`` —
 installing a model is just dropping its folder in next to the
 others. Note the big model needs a few GB of free RAM and answers
 a little slower; on a low-RAM PC, prefer the small Indian model.
+
+Phase 7: Hindi has its own candidates, picked when the language
+mode is "hi": big Hindi first, then small Hindi. Download from
+alphacephei.com/vosk/models into the models folder.
 """
 
 import os
@@ -21,6 +25,11 @@ MODEL_CANDIDATES = [
     os.path.join(_MODELS_DIR, "vosk-model-en-in-0.5"),
     os.path.join(_MODELS_DIR, "vosk-model-small-en-in-0.4"),
     os.path.join(_MODELS_DIR, "vosk-model-small-en-us-0.15"),
+]
+
+HINDI_MODEL_CANDIDATES = [
+    os.path.join(_MODELS_DIR, "vosk-model-hi-0.22"),
+    os.path.join(_MODELS_DIR, "vosk-model-small-hi-0.22"),
 ]
 
 # Backwards-compatible name (the first candidate).

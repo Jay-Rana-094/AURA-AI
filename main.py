@@ -28,9 +28,11 @@ import time
 
 from aura.brain import get_memory, handle
 from aura.gui import IslandGUI
+from aura.language import load_language
 from aura.listener import Listener
 from aura.models import MODEL_CANDIDATES, pick_model_dir
 from aura.speaker import Speaker
+from aura.theme import load_theme_name
 from aura.wake_settings import display_wake_word, load_wake_word
 from aura.wakeword import contains_wake_word
 
@@ -104,6 +106,12 @@ def main():
         turn_active.set()
         try:
             while True:
+                # Phase 7: listen and speak in the saved language.
+                # Read fresh each turn so a voice switch ("speak
+                # Hindi") takes effect on the very next turn.
+                lang = load_language()
+                listener.set_language(lang)
+                speaker.set_language(lang)
                 gui.set_state("listening", "Listening...")
                 with mic_lock:
                     text, error = listener.listen(timeout=8.0)
@@ -114,6 +122,13 @@ def main():
                 gui.show_transcript(f"You: {text}")
                 gui.set_state("thinking", "Thinking...")
                 reply, should_quit = handle(text)
+                # Theme change (Phase 6): a theme command saves the
+                # new theme in settings; recolor the pill before
+                # speaking, so the change lands with the reply.
+                try:
+                    gui.set_theme(load_theme_name())
+                except Exception:  # noqa: BLE001, S110 - theme never breaks a turn
+                    pass
                 # Conversation history (Phase 5): record the turn.
                 # Never allowed to break the turn itself.
                 try:
@@ -186,6 +201,9 @@ def main():
             if not wake_enabled["on"]:
                 time.sleep(0.2)
                 continue
+            # Phase 7: wake-word listening follows the language mode
+            # too (the Hindi model hears "ऑरा").
+            listener.set_language(load_language())
             try:
                 gui.set_state("wake", _wake_prompt())
             except Exception:  # noqa: BLE001, S110 - window closed
@@ -215,6 +233,8 @@ def main():
                     for row in get_memory().due_reminders():
                         if turn_active.is_set():
                             break  # leave it due; next poll retries
+                        # Phase 7: reminders speak in the saved mode.
+                        speaker.set_language(load_language())
                         try:
                             gui.set_state("speaking", "Reminder!")
                             gui.show_transcript(f"Reminder: {row['text']}")
@@ -222,6 +242,15 @@ def main():
                             return  # window closed
                         speaker.say(f"Reminder: {row['text']}")
                         get_memory().mark_notified(row["id"])
+                        # Notification center (Phase 6): log the fired
+                        # reminder so Jay can catch up on it later.
+                        # Never allowed to break the reminder loop.
+                        try:
+                            get_memory().add_notification(
+                                f"Reminder: {row['text']}"
+                            )
+                        except Exception:  # noqa: BLE001, S110 - log is best effort
+                            pass
                         try:
                             if wake_enabled["on"]:
                                 gui.set_state("wake", _wake_prompt())

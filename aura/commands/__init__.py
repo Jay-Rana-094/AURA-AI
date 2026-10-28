@@ -12,7 +12,15 @@ after the user says yes. Nothing destructive ever runs from parsing.
 import re
 
 from .apps import APPS, find_app, open_app
-from .system import CONFIRM_KINDS, CONFIRM_TEXT, lock, media_key, power
+from .system import (
+    CONFIRM_KINDS,
+    CONFIRM_TEXT,
+    lock,
+    media_key,
+    power,
+    screenshot,
+    set_radio,
+)
 from .web import SITES, open_site, open_url, web_search, youtube_search
 
 
@@ -31,6 +39,57 @@ def parse_command(text: str):
     # --- Lock ---
     if re.search(r"\block\b", t):
         return {"kind": "lock"}
+
+    # --- Screenshot ---
+    if re.search(r"\b(take a screenshot|screenshot|capture (the )?screen)\b", t):
+        return {"kind": "screenshot"}
+
+    # --- Radios: Bluetooth / Wi-Fi / Airplane mode ---
+    def _radio_kind(word: str) -> str:
+        return "bluetooth" if word == "bluetooth" else "wifi"
+
+    m = re.search(r"\b(turn|switch) (bluetooth|wi-?fi|wi fi) (on|off)\b", t)
+    if m:
+        return {
+            "kind": "radio",
+            "radio": _radio_kind(m.group(2)),
+            "state": "On" if m.group(3) == "on" else "Off",
+        }
+    m = re.search(r"\b(turn|switch) (on|off) (bluetooth|wi-?fi|wi fi)\b", t)
+    if m:
+        return {
+            "kind": "radio",
+            "radio": _radio_kind(m.group(3)),
+            "state": "On" if m.group(2) == "on" else "Off",
+        }
+    m = re.search(r"\b(enable|disable) (bluetooth|wi-?fi|wi fi)\b", t)
+    if m:
+        return {
+            "kind": "radio",
+            "radio": _radio_kind(m.group(2)),
+            "state": "On" if m.group(1) == "enable" else "Off",
+        }
+    m = re.search(r"\b(turn|switch) airplane mode (on|off)\b", t)
+    if m:
+        return {
+            "kind": "radio",
+            "radio": "airplane",
+            "state": "On" if m.group(2) == "on" else "Off",
+        }
+    m = re.search(r"\b(turn|switch) (on|off) airplane mode\b", t)
+    if m:
+        return {
+            "kind": "radio",
+            "radio": "airplane",
+            "state": "On" if m.group(2) == "on" else "Off",
+        }
+    m = re.search(r"\b(enable|disable) airplane mode\b", t)
+    if m:
+        return {
+            "kind": "radio",
+            "radio": "airplane",
+            "state": "On" if m.group(1) == "enable" else "Off",
+        }
 
     # --- Volume / media keys ---
     if re.search(r"\b(volume up|increase volume)\b", t):
@@ -86,6 +145,10 @@ def execute_command(cmd: dict) -> str:
         return power(kind)
     if kind == "lock":
         return lock()
+    if kind == "screenshot":
+        return screenshot()
+    if kind == "radio":
+        return set_radio(cmd["radio"], cmd["state"])
     if kind == "media_key":
         return media_key(cmd["action"])
     if kind == "open_app":

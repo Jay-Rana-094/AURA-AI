@@ -13,6 +13,10 @@ Tables:
               advanced to their next occurrence instead of finishing.
   turns     — conversation history (Phase 5): each user turn and
               AURA's reply, newest first; pruned to the last 200.
+  notifications — AURA's own notification log (Phase 6): reminders
+              that fired, newest first, unread until listed; pruned
+              to the last 50. This is AURA's record, not Windows'
+              toast notifications (those need extra app setup).
 
 All access goes through one lock: the voice thread and the reminder
 thread share this object.
@@ -64,6 +68,12 @@ class Memory:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_text TEXT NOT NULL,
                     reply_text TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    read INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
                 );
                 """
@@ -301,3 +311,41 @@ class Memory:
 
     def clear_turns(self) -> None:
         self._write("DELETE FROM turns")
+
+    # -- notifications (Phase 6) ---------------------------------------
+    # AURA's own notification log: anything the app wants Jay to
+    # catch up on later (today: reminders that fired). Listing them
+    # marks them read, like opening a notification shade.
+    _NOTIFICATION_LIMIT = 50
+
+    def add_notification(self, text: str) -> None:
+        self._write(
+            "INSERT INTO notifications (text, read, created_at)"
+            " VALUES (?, 0, ?)",
+            (text, datetime.now().strftime(_TIME_FORMAT)),
+        )
+        self._write(
+            "DELETE FROM notifications WHERE id NOT IN"
+            " (SELECT id FROM notifications ORDER BY id DESC LIMIT ?)",
+            (self._NOTIFICATION_LIMIT,),
+        )
+
+    def unread_notifications(self, limit: int = 5):
+        """Unread notifications, newest first."""
+        return self._rows(
+            "SELECT * FROM notifications WHERE read = 0"
+            " ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+
+    def unread_notification_count(self) -> int:
+        rows = self._rows(
+            "SELECT COUNT(*) AS n FROM notifications WHERE read = 0"
+        )
+        return rows[0]["n"]
+
+    def mark_notifications_read(self) -> None:
+        self._write("UPDATE notifications SET read = 1 WHERE read = 0")
+
+    def clear_notifications(self) -> None:
+        self._write("DELETE FROM notifications")
