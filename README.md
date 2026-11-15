@@ -207,3 +207,155 @@ aura/
 The offline engine keeps your voice entirely on your PC. The Google
 engine sends audio to Google's servers — the pill always shows which
 engine is active, so you always know.
+
+## Phase 8A — Control Center window
+
+Double-click the pill (or say "open control center") to open a
+separate window with a title bar — close it with the mouse or say
+"close control center". The pill itself is unchanged: borderless,
+no close button, still draggable.
+
+What the window shows (all read from the modules AURA already has):
+- **Animated core** — a pulsing orb in the header, like the pill's.
+- **Today** — the daily briefing, overdue + today's reminders,
+  high-priority todos, unread notification count.
+- **Notes · Todos · Reminders** — live lists with add / delete /
+  complete / cancel controls.
+- **History** — the recent conversation, with search and clear.
+- **Settings** — theme picker (recolors the pill too), wake word,
+  language (English / Hinglish), speech engine, always-on-top.
+- **Diagnostics** — engine, Vosk model, language, wake word, theme,
+  psutil status, Python and platform, plus live CPU / RAM / disk /
+  battery telemetry, refreshed every 2 seconds.
+- **Typed-command box** (bottom of every tab) — type a command and
+  press Enter; it runs through the same brain as a voice turn and
+  the reply is spoken aloud, like a voice turn.
+
+New dependency: `psutil` (already in `requirements.txt` — run
+`pip install -r requirements.txt` again after updating). Without it
+the Diagnostics tab says so and everything else still works.
+
+Changing the theme — by voice, by typed command, or from the
+Settings tab — recolors the open Control Center immediately,
+no reopen needed (fixed in the 8A v2 build, 2026-11-15).
+
+## Phase 8B — Faster-Whisper engine (third speech engine)
+
+AURA now has three listening engines, switchable from the pill's
+engine menu, the Control Center's Settings tab, or by voice
+("switch engine to whisper" / "switch engine to offline" /
+"switch engine to google"):
+
+- **offline** — Vosk, fully on-device (as before).
+- **google** — Google's web speech API (as before).
+- **whisper** — Faster-Whisper: OpenAI's Whisper model running
+  locally. The "small" multilingual model hears both English and
+  Hindi and fits the RTX 3050's 6 GB at float16; on a PC without
+  a usable GPU it runs on CPU at int8 instead.
+
+First Whisper listen loads the model — the first time, it also
+downloads it (~500 MB) from HuggingFace, so the pill says
+"Loading Whisper model..." while that happens. Later listens reuse
+the loaded model. The wake word still always uses Vosk (light,
+and it never sends audio anywhere).
+
+GPU needs the CUDA 12 libraries: `pip install -r requirements.txt`
+already includes `nvidia-cublas-cu12` and `nvidia-cudnn-cu12`.
+If they are missing, Whisper still works — it falls back to CPU.
+Check the Diagnostics tab in the Control Center to see the
+Whisper status: installed, model, device, and whether it is loaded.
+
+Whisper records the whole utterance, then transcribes it at once,
+so it waits for ~1.2 seconds of silence after you finish speaking
+(Vosk streams instead). Speak, pause, and the reply follows.
+
+Drag still works exactly as before: a double-click only opens the
+window when the pill never moved between the two clicks, so a drag
+can never open it by accident. A taught custom phrase with the
+same words as "open control center" still wins over the built-in,
+like every other built-in command.
+
+**Fixed in the 8B v2 build (2026-11-15)** — first test on Jay's PC
+looked like Whisper was not listening at all:
+- The pill now really stays on "Loading Whisper model..." until
+  the model has finished loading (first run: ~500 MB download).
+  Before, it flipped to "Listening..." at once, so speech during
+  the download was never recorded and the turn timed out.
+- A listen error now stays on the pill (and in the transcript)
+  instead of flashing and being reset to idle.
+- A failed model load is no longer cached forever: it retries on
+  the next attempt, and a GPU failure falls back to CPU inside
+  the same load instead of failing the turn.
+- Typed commands now surface a brain failure as a reply instead
+  of vanishing silently.
+
+**Fixed in the 8B v3 build (2026-11-15)** — the v2 fix worked
+(the error finally stayed visible), and the error was
+`Library cublas64_12.dll is not found or cannot be loaded`:
+- Windows does not find the CUDA runtime DLLs on its own, even
+  after `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`.
+  AURA now prepends the pip packages' `nvidia\cublas\bin` and
+  `nvidia\cudnn\bin` folders to PATH before loading
+  Faster-Whisper — ctranslate2 resolves cuBLAS with a plain
+  LoadLibrary, which consults PATH and ignores
+  `os.add_dll_directory`, so PATH is the fix.
+- Safety net: the model can load on GPU yet fail at inference
+  time, because cuBLAS is resolved lazily. If transcription
+  fails with a CUDA-library error, AURA rebuilds the model on
+  CPU and retries the same clip once instead of failing the
+  turn. Diagnostics then shows the CPU device.
+
+**Fixed in the 8B v4 build (2026-11-15)** — Whisper itself
+works (Jay's "what is the time" was answered through it), but
+switching by voice left the Control Center's Settings radio on
+Offline: only the pill menu synced, never the open window.
+Now every engine switch — voice, typed, pill menu, or radio —
+refreshes the open Control Center too (radio, header, and
+Diagnostics), on the GUI thread, so there is one engine state
+everywhere and nothing to change twice.
+
+## Phase 8C — Conversational fallback (Groq)
+
+When AURA has no command for something, it asks Groq
+automatically — no "turn on" step. Commands always win: the
+fallback runs last, after every command pack and built-in reply,
+and a taught custom phrase still beats it.
+
+It uses Groq's free tier, model `llama-3.3-70b-versatile` (the
+same model AutoClip already uses on the same key). Answers are
+kept short (max 300 tokens) because they are spoken aloud, and
+the last few turns are sent along for context. In Hinglish mode
+it answers in Hinglish.
+
+**Setup — one step:** AURA needs your Groq API key. Either set
+the `GROQ_API_KEY` environment variable in the terminal you
+launch AURA from, or save the key (one line, the key only) in a
+file called `groq_api_key.txt` next to `main.py`. That file is
+never zipped and never pushed to GitHub (see `.gitignore`) —
+and never type the key into this chat.
+
+**If the key is missing**, an unmatched question just gets the
+old "I don't know how to do that yet." — no nagging. The
+Control Center's Settings tab says "Groq key: missing" until
+the key is in place, and saying "turn on chat mode" tells you
+what to add.
+
+**To stop it:** say "turn off chat mode", or uncheck the chat
+checkbox in the Control Center's Settings tab. "is chat mode
+on" reports the state. The Diagnostics tab shows the chat
+status (on/off, key set/missing, model). A chat failure (no
+internet, bad key, service error) is spoken as an honest
+message — it never crashes the turn.
+
+**Fixed in the 8C v2 build (2026-11-15)** — first test on Jay's
+PC answered "tell me a joke" with "The chat service answered
+with an error (HTTP 404)":
+- The cause was not the key and not the setup. Groq retired
+  `llama-3.3-70b-versatile` for free and developer tiers on
+  2026-08-16 — it now 404s with `model_not_found`, which reads
+  exactly like a broken key. The model is now
+  `openai/gpt-oss-120b`, Groq's own recommended replacement
+  for the 70B Llama (free tier, ~500 tokens/s).
+- Failures now carry Groq's own error text with them, so the
+  next retirement diagnoses itself instead of a bare "HTTP
+  404" — a 404 now says the model no longer exists.

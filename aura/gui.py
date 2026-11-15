@@ -20,12 +20,17 @@ and forwards button presses to callbacks in main.py, so the window
 stays responsive while voice work happens on worker threads.
 
 Interface (unchanged from the classic pill, so main.py needs no edits):
-    IslandGUI(on_mic, on_engine_change, on_wake_toggle)
+    IslandGUI(on_mic, on_engine_change, on_wake_toggle, on_control_center)
     set_state(state, status)   # idle/listening/thinking/speaking/error/wake
     show_transcript(text)
     set_wake_active(active)
     set_theme(name)            # recolor the pill (Phase 6)
     run() / close()
+
+Phase 8A: double-clicking the pill (stationary, not a drag, and not
+on a button) calls on_control_center, which main.py uses to open
+the Control Center window. Dragging still only moves the pill when
+the mouse actually moves, so a stationary double-click is free.
 """
 
 import random
@@ -110,13 +115,18 @@ def _rounded_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
 
 
 class IslandGUI:
-    def __init__(self, on_mic, on_engine_change, on_wake_toggle=None):
+    def __init__(self, on_mic, on_engine_change, on_wake_toggle=None,
+                 on_control_center=None):
         """on_mic: called when the mic button is pressed.
-        on_engine_change(engine): called with "offline" or "google".
-        on_wake_toggle(enabled): called when the wake button is tapped."""
+        on_engine_change(engine): called with "offline", "google"
+        or "whisper" (Phase 8B).
+        on_wake_toggle(enabled): called when the wake button is tapped.
+        on_control_center: called on a stationary double-click
+        (Phase 8A) — main.py opens the Control Center window."""
         self.on_mic = on_mic
         self.on_engine_change = on_engine_change
         self.on_wake_toggle = on_wake_toggle
+        self.on_control_center = on_control_center
         self._wake_on = False
         self._state = "idle"
         self._busy = False
@@ -136,6 +146,11 @@ class IslandGUI:
         screen_w = self.root.winfo_screenwidth()
         x = (screen_w - PILL_WIDTH) // 2
         self.root.geometry(f"{PILL_WIDTH}x{PILL_HEIGHT}+{x}+{TOP_MARGIN}")
+        # Press position at startup: the double-click handler
+        # compares against this, so it is correct even before the
+        # first real press (Phase 8A).
+        self._press_root_x = x
+        self._press_root_y = TOP_MARGIN
 
         self.canvas = tk.Canvas(
             self.root, width=PILL_WIDTH, height=PILL_HEIGHT,
@@ -196,9 +211,10 @@ class IslandGUI:
             font=("Segoe UI", 9))
 
         # Engine selector (small, dark, bottom-middle of the pill).
+        # Phase 8B adds "whisper" (Faster-Whisper, GPU on his PC).
         self.engine_var = tk.StringVar(value="offline")
         self.engine_menu = tk.OptionMenu(
-            self.root, self.engine_var, "offline", "google",
+            self.root, self.engine_var, "offline", "google", "whisper",
             command=self._engine_changed)
         self.engine_menu.configure(
             bg=t["control"], fg=t["label"], activebackground="#1e1e5e",
@@ -238,6 +254,10 @@ class IslandGUI:
         self._drag_ok = False
         self.canvas.bind("<Button-1>", self._drag_start)
         self.canvas.bind("<B1-Motion>", self._drag_move)
+        # Phase 8A: stationary double-click opens the Control Center.
+        # Dragging only moves the pill when the mouse actually moves,
+        # so a double-click that never moved the pill is free to use.
+        self.canvas.bind("<Double-Button-1>", self._control_center_open)
 
     # -- user actions -------------------------------------------------------
     def _mic_pressed(self, event=None):
@@ -263,6 +283,14 @@ class IslandGUI:
     def _engine_changed(self, value):
         self.on_engine_change(value)
 
+    def set_engine(self, engine: str):
+        """Sync the engine menu to a voice-switched engine
+        (Phase 8B). Thread-safe: the menu update runs on the GUI
+        thread. A no-op for unknown names."""
+        if engine not in ("offline", "google", "whisper"):
+            return
+        self.root.after(0, lambda: self.engine_var.set(engine))
+
     def _drag_start(self, event):
         under = self.canvas.find_withtag("current")
         if under and under[0] in self._button_items:
@@ -271,6 +299,11 @@ class IslandGUI:
         self._drag_ok = True
         self._drag_x = event.x
         self._drag_y = event.y
+        # Where the pill was at press time: the double-click handler
+        # compares against this, so a drag is never mistaken for a
+        # stationary double-click (Phase 8A).
+        self._press_root_x = self.root.winfo_x()
+        self._press_root_y = self.root.winfo_y()
 
     def _drag_move(self, event):
         if not self._drag_ok:
@@ -278,6 +311,21 @@ class IslandGUI:
         x = self.root.winfo_x() + event.x - self._drag_x
         y = self.root.winfo_y() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
+
+    def _control_center_open(self, event=None):
+        """Phase 8A: open the Control Center on a stationary
+        double-click. Ignored when nothing is wired up, when the
+        click landed on a button, or when the pill moved since the
+        press (i.e. it was a drag, not a double-click)."""
+        if self.on_control_center is None:
+            return
+        under = self.canvas.find_withtag("current")
+        if under and under[0] in self._button_items:
+            return
+        if (self.root.winfo_x() != self._press_root_x
+                or self.root.winfo_y() != self._press_root_y):
+            return
+        self.on_control_center()
 
     # -- state updates (safe to call from worker threads via after()) -------
     def _dot_colors(self):

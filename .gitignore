@@ -6,6 +6,9 @@ models/
 custom_commands.json
 aura_settings.json
 aura-speech.log
+# Groq API key for Phase 8C chat mode (one line, the key only).
+# Never commit this — it is a live secret, like a password.
+groq_api_key.txt
 # Python caches.
 __pycache__/
 *.pyc

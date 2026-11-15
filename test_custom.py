@@ -10,6 +10,8 @@ import os
 import tempfile
 
 from aura.brain import handle, set_custom_store
+from aura.chat import set_chat_enabled
+from aura.chat import set_settings_path as set_chat_settings_path
 from aura.commands.custom import CustomStore, parse_custom_management
 
 
@@ -19,6 +21,11 @@ def main():
     os.unlink(path)  # store must start empty, not from a blank file
     store = CustomStore(path)
     set_custom_store(store)
+    # Phase 8C: chat fallback is ON by default, so isolate it here
+    # — these tests assert the old "I don't know" fallback.
+    tmp = tempfile.mkdtemp()
+    set_chat_settings_path(os.path.join(tmp, "settings.json"))
+    set_chat_enabled(False)
 
     # --- Parsing ---
     cmd = parse_custom_management("teach aura study time means open vs code")

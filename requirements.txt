@@ -6,6 +6,13 @@ vosk==0.3.45                 # Offline speech recognition (needs a model, see RE
 pyttsx3==2.99                # Offline text-to-speech
 PyAudio==0.2.14              # Microphone access (Windows wheels available on PyPI)
 requests==2.32.3             # Used by later phases (web info); harmless in phase 1
+psutil==6.1.0                # Phase 8A: live CPU / RAM / disk / battery telemetry
+faster-whisper==1.2.1        # Phase 8B: Whisper speech engine (GPU on RTX 3050, CPU fallback)
+# Phase 8B GPU libraries (Windows + Linux, x86_64): cuBLAS + cuDNN 9
+# for CUDA 12. ctranslate2 loads these at runtime; without them the
+# Whisper engine falls back to CPU automatically.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*
 
 # NOTE: tkinter ships with standard Python on Windows — no install needed.
 # NOTE: Vosk also needs a model file (not on PyPI). Download the small

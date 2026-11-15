@@ -13,6 +13,14 @@ Order of handling:
 import re
 from datetime import datetime
 
+from aura.chat import (
+    ChatError,
+    chat_available,
+    chat_reply,
+    get_api_key,
+    is_chat_enabled,
+    set_chat_enabled,
+)
 from aura.commands import CONFIRM_KINDS, execute_command, parse_command
 from aura.commands.custom import (
     CustomStore,
@@ -66,6 +74,24 @@ _NO = {"no", "nope", "cancel", "never mind", "nevermind", "stop", "don't"}
 _pending = None
 _memory = None
 _custom_store = None
+# Phase 8A: a voice command that opens or closes the Control Center
+# cannot open a window from the brain (it has no GUI). handle()
+# records the request here, and main.py reads + clears it right
+# after the turn's handle() call. Phase 8B reuses the same channel
+# for engine switches ("engine_whisper", "engine_offline",
+# "engine_google"). See pop_gui_action().
+_gui_action = None
+
+
+def pop_gui_action():
+    """Take the pending GUI request ("open_control_center" /
+    "close_control_center" / "engine_whisper" / "engine_offline" /
+    "engine_google" / "chat_refresh"), or None. Main.py calls this
+    after every handle() — including typed commands from the
+    window."""
+    global _gui_action
+    action, _gui_action = _gui_action, None
+    return action
 
 
 def get_custom_store() -> CustomStore:
@@ -134,7 +160,7 @@ def handle_wake_word_command(cleaned: str):
 
 
 def handle(text: str, _from_custom: bool = False):
-    global _pending
+    global _pending, _gui_action
     cleaned = text.strip().lower()
     if not cleaned:
         return "I didn't catch that.", False
@@ -194,6 +220,84 @@ def handle(text: str, _from_custom: bool = False):
         mapped = get_custom_store().match(cleaned)
         if mapped is not None:
             return handle(mapped, _from_custom=True)
+
+    # 3b. Control Center (Phase 8A). Placed AFTER custom phrases so
+    # a taught phrase with the same words still wins, like every
+    # other built-in. The brain only records the request — main.py
+    # opens or closes the window (the brain has no GUI).
+    if cleaned in ("open control center", "open the control center",
+                   "show control center", "show the control center",
+                   "open control centre", "open the control centre"):
+        _gui_action = "open_control_center"
+        return "Opening the Control Center.", False
+    if cleaned in ("close control center", "close the control center",
+                   "hide control center", "hide the control center",
+                   "close control centre", "close the control centre"):
+        _gui_action = "close_control_center"
+        return "Closing the Control Center.", False
+
+    # 3c. Speech engine (Phase 8B). Same channel as 3b, same rule:
+    # a taught phrase with the same words still wins. The brain
+    # only records the request — main.py switches the listener.
+    _engine_match = re.match(
+        r"(switch|change|use)( the| my)? (engine|speech engine|"
+        r"recognition engine)? ?to (offline|vosk|google|whisper)$",
+        cleaned,
+    )
+    if _engine_match:
+        word = _engine_match.group(4)
+        engine = "offline" if word in ("offline", "vosk") else word
+        _gui_action = f"engine_{engine}"
+        return f"Switching to the {engine} engine.", False
+    if cleaned in ("switch to whisper", "use whisper",
+                   "switch to the whisper engine"):
+        _gui_action = "engine_whisper"
+        return "Switching to the whisper engine.", False
+    if cleaned in ("switch to offline", "use offline",
+                   "switch to vosk", "use vosk"):
+        _gui_action = "engine_offline"
+        return "Switching to the offline engine.", False
+    if cleaned in ("switch to google", "use google"):
+        _gui_action = "engine_google"
+        return "Switching to the google engine.", False
+
+    # 3d. Chat fallback controls (Phase 8C). Same placement rule
+    # as 3b/3c: after custom phrases, so a taught phrase still
+    # wins. The flag is set here; main.py refreshes the open
+    # Control Center via the "chat_refresh" gui action, so its
+    # checkbox follows a voice/typed toggle (like the engine
+    # radio did in 8B v4).
+    if cleaned in ("turn on chat mode", "enable chat mode",
+                   "turn chat mode on", "enable chat",
+                   "turn on conversation mode",
+                   "enable conversation mode",
+                   "enable conversation fallback"):
+        set_chat_enabled(True)
+        _gui_action = "chat_refresh"
+        if get_api_key() is None:
+            return (
+                "Chat mode is on, but I don't have a Groq API key "
+                "yet — add your key to the GROQ_API_KEY environment "
+                "variable, or save it in a groq_api_key.txt file "
+                "next to main.py, then ask me anything.", False)
+        return ("Chat mode is on — I'll answer questions I don't "
+                "have a command for, using Groq.", False)
+    if cleaned in ("turn off chat mode", "disable chat mode",
+                   "turn chat mode off", "disable chat",
+                   "turn off conversation mode",
+                   "disable conversation mode",
+                   "disable conversation fallback"):
+        set_chat_enabled(False)
+        _gui_action = "chat_refresh"
+        return "Chat mode is off.", False
+    if cleaned in ("is chat mode on", "chat mode status",
+                   "is conversation mode on"):
+        if is_chat_enabled():
+            key_note = ("with your Groq key ready"
+                        if get_api_key() is not None
+                        else "but no Groq key is set yet")
+            return f"Chat mode is on, {key_note}.", False
+        return "Chat mode is off.", False
 
     # 4. Memory commands (notes, todos, reminders).
     mem_cmd = parse_memory_command(cleaned)
@@ -262,7 +366,16 @@ def handle(text: str, _from_custom: bool = False):
             "notifications do I have' to catch up on reminders "
             "that fired, or 'find my report file' to search "
             "Documents, Downloads and Desktop. Say 'speak Hindi' "
-            "to switch to Hindi."
+            "to switch to Hindi. Say 'open control center' — or "
+            "double-click the pill — to open the Control Center "
+            "window with today's briefing, your lists, history, "
+            "settings and live system stats. I listen with three "
+            "engines — offline Vosk, Google, and Whisper on your "
+            "graphics card — and you can switch between them from "
+            "the pill menu, the Control Center, or by saying "
+            "'switch engine to whisper'. If I don't have a command "
+            "for something, I ask Groq for an answer automatically "
+            "— say 'turn off chat mode' to stop that."
         ), False
     if re.search(r"\b(hello|hi|hey)\b", cleaned):
         return "Hey! I'm AURA, your assistant. What can I do for you?", False
@@ -275,5 +388,30 @@ def handle(text: str, _from_custom: bool = False):
     if re.search(r"\b(stop|exit|quit|goodbye|bye)\b", cleaned):
         return "Goodbye! Talk to you soon.", True
 
-    # 7. Honest fallback.
+    # 7. Conversational fallback (Phase 8C): only when no command
+    # matched and chat mode is on AND a key is set — this runs
+    # last on purpose, so commands always win. Without a key the
+    # old honest fallback stands (see chat_available()).
+    if chat_available():
+        try:
+            reply = chat_reply(
+                text.strip(),
+                history=_recent_history(),
+                language=load_language(),
+            )
+        except ChatError as exc:
+            return str(exc), False
+        if reply:
+            return reply, False
     return "I don't know how to do that yet.", False
+
+
+def _recent_history(limit: int = 4):
+    """Last few turns, oldest first, for the chat fallback's
+    context. The current turn is not recorded yet, so it is not
+    in here — the question itself is passed separately."""
+    turns = get_memory().recent_turns(limit=limit)
+    return [
+        (row["user_text"], row["reply_text"])
+        for row in reversed(turns)
+    ]
