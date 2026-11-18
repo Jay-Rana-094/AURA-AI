@@ -17,12 +17,29 @@ Tables:
               that fired, newest first, unread until listed; pruned
               to the last 50. This is AURA's record, not Windows'
               toast notifications (those need extra app setup).
+  facts       — long-term memory (Phase 10.1): structured
+              project facts the user EXPLICITLY asked AURA to
+              remember ("remember that Nexture's stack is MERN").
+              A fact is (project, key, value); re-saving the same
+              fact updates it — the newer explicit correction wins.
+              Never auto-saved from ordinary speech, and secrets
+              (passwords, tokens, keys) are refused, never stored.
+  preferences — long-term memory: simple key/value preferences
+              ("my preferred editor is VS Code"), same rules as
+              facts.
+  focus_sessions — Focus Mode history (Phase 10.1): one row
+              per finished session (task, profile, duration,
+              status). The LIVE session (running/paused, remaining
+              time) is runtime state in aura/focus.py, not a row
+              here — only finished sessions are recorded, so an
+              interrupted session is never claimed as completed.
 
 All access goes through one lock: the voice thread and the reminder
 thread share this object.
 """
 
 import os
+import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -34,6 +51,21 @@ DEFAULT_DB = os.path.join(
 
 _TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+_SECRET_RE = re.compile(
+    r"\b(password|passwd|pwd|passcode|token|secret|passkey|credential|"
+    r"private\s+key|api\s+key|access\s+key|client\s+secret)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_secret(text):
+    """True when text mentions a password/token/key — never store those."""
+    return bool(text) and bool(_SECRET_RE.search(text))
+
+
+def _now():
+    return datetime.now().strftime(_TIME_FORMAT)
+
 
 class Memory:
     def __init__(self, path: str | None = None):
@@ -44,6 +76,32 @@ class Memory:
         with self._lock:
             self._conn.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS facts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT NOT NULL DEFAULT '',
+                    project TEXT NOT NULL DEFAULT '',
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'voice',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(project, key)
+                );
+                CREATE TABLE IF NOT EXISTS preferences (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    key TEXT NOT NULL UNIQUE,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS focus_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task TEXT NOT NULL DEFAULT '',
+                    profile TEXT NOT NULL DEFAULT 'custom',
+                    duration_seconds INTEGER NOT NULL DEFAULT 0,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'completed'
+                );
                 CREATE TABLE IF NOT EXISTS notes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     text TEXT NOT NULL,
@@ -349,3 +407,159 @@ class Memory:
 
     def clear_notifications(self) -> None:
         self._write("DELETE FROM notifications")
+
+    # -- facts (long-term memory, Phase 10.1) ---------------------------
+    # Every write here is explicit: the user said "remember that..." (or
+    # an update/forget command). AURA never auto-saves facts from
+    # conversation. Secrets are refused at this layer too, so no caller
+    # can store a password/token/key by accident.
+
+    def save_fact(self, project, key, value, category="", source="voice"):
+        """Upsert a fact. A newer explicit correction wins (same project+key).
+
+        Returns the row id. Raises ValueError for secrets.
+        """
+        if _looks_like_secret(key) or _looks_like_secret(value):
+            raise ValueError("I can't store passwords, tokens, or secret keys.")
+        now = _now()
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT id FROM facts WHERE project = ? AND key = ?",
+                (project, key),
+            )
+            row = cur.fetchone()
+            if row:
+                cur.execute(
+                    "UPDATE facts SET value = ?, category = ?, source = ?,"
+                    " updated_at = ? WHERE id = ?",
+                    (value, category, source, now, row[0]),
+                )
+                fact_id = row[0]
+            else:
+                cur.execute(
+                    "INSERT INTO facts (category, project, key, value, source,"
+                    " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (category, project, key, value, source, now, now),
+                )
+                fact_id = cur.lastrowid
+            self._conn.commit()
+            return fact_id
+
+    def get_fact(self, project, key):
+        """The fact row (dict) for a project+key, or None."""
+        rows = self._rows(
+            "SELECT * FROM facts WHERE project = ? AND key = ?",
+            (project, key),
+        )
+        return dict(rows[0]) if rows else None
+
+    def find_facts(self, project):
+        """All facts for a project (every fact when project is ''), newest first."""
+        if project:
+            rows = self._rows(
+                "SELECT * FROM facts WHERE project = ?"
+                " ORDER BY updated_at DESC",
+                (project,),
+            )
+        else:
+            rows = self._rows("SELECT * FROM facts ORDER BY updated_at DESC")
+        return [dict(r) for r in rows]
+
+    def list_facts(self):
+        """All facts, newest first."""
+        return self.find_facts("")
+
+    def list_projects(self):
+        """Distinct non-empty project names that have facts, sorted."""
+        rows = self._rows(
+            "SELECT DISTINCT project FROM facts WHERE project != ''"
+            " ORDER BY project"
+        )
+        return [r[0] for r in rows]
+
+    def delete_fact(self, project, key):
+        """Delete one fact. Returns True when a row was removed."""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM facts WHERE project = ? AND key = ?",
+                (project, key),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def delete_fact_number(self, number):
+        """Delete the Nth entry in list order (1-based) — the same
+        numbering the "list what you remember" reply shows: facts
+        newest first, then preferences. A deleted preference comes
+        back as a fact-shaped dict (project ""), so the caller can
+        describe it the same way. Returns None when out of range.
+        """
+        facts = self.list_facts()
+        prefs = self.list_preferences()
+        if number < 1 or number > len(facts) + len(prefs):
+            return None
+        if number <= len(facts):
+            fact = facts[number - 1]
+            self.delete_fact(fact["project"], fact["key"])
+            return fact
+        pref = prefs[number - len(facts) - 1]
+        self.delete_preference(pref["key"])
+        return {"project": "", "key": pref["key"],
+                "value": pref["value"]}
+
+    # -- preferences (Phase 10.1) -----------------------------------------
+    # Simple key/value store for user preferences ("my preferred editor
+    # is VS Code"). Same explicit-save rule as facts; secrets refused.
+
+    def save_preference(self, key, value):
+        if _looks_like_secret(key) or _looks_like_secret(value):
+            raise ValueError("I can't store passwords, tokens, or secret keys.")
+        self._write(
+            "INSERT INTO preferences (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+            " updated_at = excluded.updated_at",
+            (key, value, _now()),
+        )
+
+    def get_preference(self, key):
+        rows = self._rows(
+            "SELECT * FROM preferences WHERE key = ?", (key,)
+        )
+        return dict(rows[0]) if rows else None
+
+    def list_preferences(self):
+        rows = self._rows("SELECT * FROM preferences ORDER BY key")
+        return [dict(r) for r in rows]
+
+    def delete_preference(self, key):
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM preferences WHERE key = ?", (key,)
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    # -- focus sessions (Phase 10.1) --------------------------------------
+    # History of finished/ended focus sessions. A session is only recorded
+    # when it finishes or is ended deliberately — closing AURA mid-session
+    # writes nothing, so a row never claims a session completed when it didn't.
+
+    def record_focus_session(self, task, profile, duration_seconds,
+                             started_at, ended_at, status):
+        return self._write(
+            "INSERT INTO focus_sessions (task, profile, duration_seconds,"
+            " started_at, ended_at, status) VALUES (?, ?, ?, ?, ?, ?)",
+            (task, profile, int(duration_seconds), started_at, ended_at,
+             status),
+        )
+
+    def list_focus_sessions(self, limit=20):
+        # Newest first; id breaks ties when two sessions share a
+        # started_at second (started_at has 1-second resolution).
+        rows = self._rows(
+            "SELECT * FROM focus_sessions ORDER BY started_at DESC,"
+            " id DESC LIMIT ?",
+            (limit,),
+        )
+        return [dict(r) for r in rows]

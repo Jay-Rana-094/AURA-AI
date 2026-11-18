@@ -25,6 +25,7 @@ import subprocess
 from datetime import datetime, timedelta
 
 from aura.commands.apps import find_app
+from aura.memory import _looks_like_secret
 
 _ASCII_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
 
@@ -342,6 +343,8 @@ def execute_hindi_command(cmd: dict, memory) -> str:
             return f"{name} kholne mein dikkat hui."
         return f"{name} khul raha hai."
     if kind == "note_add":
+        if _looks_like_secret(cmd["text"]):
+            return "Main passwords, tokens ya secret keys save nahi kar sakta."
         memory.add_note(cmd["text"])
         return "Note save ho gaya."
     if kind == "note_list":

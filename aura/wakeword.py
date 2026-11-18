@@ -20,3 +20,28 @@ def contains_wake_word(text: str, wake_word: str = "aura") -> bool:
     if wake_word == "aura" and "ऑरा" in text:
         return True
     return False
+
+
+#: Phrases that stop speech mid-reply (barge-in fix, 2026-11-17).
+#: Saying one of these while AURA speaks cuts the reply off, the
+#: same way the wake word does. Whole-word/phrase matching, like
+#: the wake word — "stop" must not fire inside "stopped" or
+#: "nonstop". No Hindi equivalents: the Hindi pack has no
+#: stop/interrupt vocabulary (its "बंद करो" means "close it",
+#: not "stop speaking"), so there is no clean fit to add.
+STOP_PHRASES = ("stop", "stop speaking", "be quiet", "quiet", "enough")
+
+
+def contains_any_phrase(text: str, phrases) -> bool:
+    """True if any of ``phrases`` appears as a whole word/phrase
+    in ``text`` (case-insensitive)."""
+    lowered = text.lower()
+    return any(
+        re.search(rf"\b{re.escape(phrase)}\b", lowered) is not None
+        for phrase in phrases
+    )
+
+
+def contains_stop_phrase(text: str) -> bool:
+    """True if ``text`` contains a stop phrase (see STOP_PHRASES)."""
+    return contains_any_phrase(text, STOP_PHRASES)

@@ -44,6 +44,32 @@ from aura.commands.file_cmds import (
     execute_file_command,
     parse_file_command,
 )
+from aura.commands.spotify_cmds import (
+    execute_spotify_command,
+    parse_spotify_command,
+)
+from aura.commands.facts_cmds import (
+    execute_facts_command,
+    parse_facts_command,
+)
+from aura.commands.focus_cmds import (
+    execute_focus_command,
+    parse_focus_command,
+)
+from aura.commands.personality_cmds import (
+    execute_personality_command,
+    parse_personality_command,
+)
+from aura.focus import FocusManager
+from aura.calendar import (
+    execute_calendar_command,
+    parse_calendar_command,
+)
+from aura.gpu import execute_gpu_command, parse_gpu_command
+from aura.hotkey import execute_hotkey_command, parse_hotkey_command
+from aura.morning import execute_morning_command, parse_morning_command
+from aura.tray import execute_tray_command, parse_tray_command
+from aura.weather import execute_weather_command, parse_weather_command
 from aura.commands.hindi_cmds import (
     execute_hindi_command,
     parse_hindi_command,
@@ -86,9 +112,9 @@ _gui_action = None
 def pop_gui_action():
     """Take the pending GUI request ("open_control_center" /
     "close_control_center" / "engine_whisper" / "engine_offline" /
-    "engine_google" / "chat_refresh"), or None. Main.py calls this
-    after every handle() — including typed commands from the
-    window."""
+    "engine_google" / "chat_refresh" / "personality_refresh"), or
+    None. Main.py calls this after every handle() — including typed
+    commands from the window."""
     global _gui_action
     action, _gui_action = _gui_action, None
     return action
@@ -120,6 +146,30 @@ def set_memory(memory: Memory) -> None:
     """Swap the store — used by tests (in-memory DB)."""
     global _memory
     _memory = memory
+
+
+_focus_manager = None
+
+
+def get_focus_manager() -> FocusManager:
+    """The shared focus session manager (lazy: created on first use)."""
+    global _focus_manager
+    if _focus_manager is None:
+        _focus_manager = FocusManager()
+    return _focus_manager
+
+
+def set_focus_manager(manager) -> None:
+    """Swap the manager — used by tests (fake clock)."""
+    global _focus_manager
+    _focus_manager = manager
+
+
+def confirmation_pending() -> bool:
+    """True when the last turn asked "are you sure?" and is awaiting
+    a yes/no. main.py uses this to show the WAITING_CONFIRMATION
+    state on the pill."""
+    return _pending is not None
 
 
 def _now_time() -> str:
@@ -299,6 +349,15 @@ def handle(text: str, _from_custom: bool = False):
             return f"Chat mode is on, {key_note}.", False
         return "Chat mode is off.", False
 
+    # 4a. Long-term memory (Phase 10.1): explicit facts. Routed
+    # BEFORE the note/todo/reminder step so a fact-shaped "remember
+    # that..." wins over note_add — while the plain note phrase
+    # ("remember that my keys are on the desk") matches no fact
+    # pattern and still lands as a note.
+    facts_cmd = parse_facts_command(cleaned)
+    if facts_cmd is not None:
+        return execute_facts_command(facts_cmd, get_memory()), False
+
     # 4. Memory commands (notes, todos, reminders).
     mem_cmd = parse_memory_command(cleaned)
     if mem_cmd is not None:
@@ -321,6 +380,15 @@ def handle(text: str, _from_custom: bool = False):
     if theme_cmd is not None:
         return execute_theme_command(theme_cmd), False
 
+    # 4d2. Personality modes (Phase 10.1). The mode is persisted
+    # here; main.py refreshes the open Control Center via the
+    # "personality_refresh" gui action, so its radios follow a
+    # voice/typed switch (the chat_refresh pattern from 8C).
+    pers_cmd = parse_personality_command(cleaned)
+    if pers_cmd is not None:
+        _gui_action = "personality_refresh"
+        return execute_personality_command(pers_cmd), False
+
     # 4e. Clipboard control (Phase 6).
     clip_cmd = parse_clipboard_command(cleaned)
     if clip_cmd is not None:
@@ -337,6 +405,81 @@ def handle(text: str, _from_custom: bool = False):
     file_cmd = parse_file_command(cleaned)
     if file_cmd is not None:
         return execute_file_command(file_cmd), False
+
+    # 4h. GPU usage (Phase 9.1). Reads the GPU through GPUtil;
+    # the reply is honest when there is no GPU to read.
+    gpu_cmd = parse_gpu_command(cleaned)
+    if gpu_cmd is not None:
+        return execute_gpu_command(gpu_cmd), False
+
+    # 4i. Weather (Phase 9.1). The standalone question speaks
+    # the same line the briefing carries (or says it is
+    # unavailable right now).
+    weather_cmd = parse_weather_command(cleaned)
+    if weather_cmd is not None:
+        return execute_weather_command(weather_cmd), False
+
+    # 4j. Spotify (Phase 9.1). Routed before the command packs
+    # so "play lo-fi on Spotify" plays (or opens the web search
+    # when the API is not connected) instead of falling through
+    # to a generic web search.
+    spotify_cmd = parse_spotify_command(cleaned)
+    if spotify_cmd is not None:
+        return execute_spotify_command(spotify_cmd), False
+
+    # 4k. Morning briefing (Phase 9.2A). The toggle / time /
+    # status commands. Placed before the built-ins on purpose:
+    # "stop morning briefing" contains "stop", which the
+    # built-in exit rule would otherwise catch first.
+    morning_cmd = parse_morning_command(cleaned)
+    if morning_cmd is not None:
+        reply, action = execute_morning_command(morning_cmd)
+        if action is not None:
+            _gui_action = action
+        return reply, False
+
+    # 4l. System tray (Phase 9.2A). "minimize to tray" / "show
+    # the pill". The executor returns the GUI action (or None
+    # when the tray is not available — the pill then stays).
+    tray_cmd = parse_tray_command(cleaned)
+    if tray_cmd is not None:
+        reply, action = execute_tray_command(tray_cmd)
+        if action is not None:
+            _gui_action = action
+        return reply, False
+
+    # 4m. Global hotkey (Phase 9.2B). Toggle / set / status.
+    # Placed before the built-ins on purpose: "stop hotkey"
+    # contains "stop", which the built-in exit rule would
+    # otherwise catch first (same reason as the morning
+    # briefing at 4k).
+    hotkey_cmd = parse_hotkey_command(cleaned)
+    if hotkey_cmd is not None:
+        reply, action = execute_hotkey_command(hotkey_cmd)
+        if action is not None:
+            _gui_action = action
+        return reply, False
+
+    # 4n. Google Calendar (Phase 9.2B). "what's on my calendar
+    # today" / "any meetings today". Routed before the command
+    # packs so it never falls through to a web search.
+    calendar_cmd = parse_calendar_command(cleaned)
+    if calendar_cmd is not None:
+        reply, _ = execute_calendar_command(calendar_cmd)
+        return reply, False
+
+    # 4o. Focus Mode (Phase 10.1). Routed BEFORE the command
+    # packs: aura/commands/__init__.py matches "start..." via the
+    # app opener, so a focus command would otherwise open an app
+    # instead of starting a session.
+    focus_cmd = parse_focus_command(cleaned)
+    if focus_cmd is not None:
+        return (
+            execute_focus_command(
+                focus_cmd, get_focus_manager(), get_memory()
+            ),
+            False,
+        )
 
     # 5. Command packs.
     cmd = parse_command(cleaned)
@@ -375,7 +518,35 @@ def handle(text: str, _from_custom: bool = False):
             "the pill menu, the Control Center, or by saying "
             "'switch engine to whisper'. If I don't have a command "
             "for something, I ask Groq for an answer automatically "
-            "— say 'turn off chat mode' to stop that."
+            "— say 'turn off chat mode' to stop that. I can also "
+            "tell you the weather — say 'what's the weather' — and "
+            "the daily briefing carries it too. Say 'what's my gpu "
+            "usage' for the graphics card's load, memory and "
+            "temperature, or check the Diagnostics tab. And for "
+            "Spotify: 'play lo-fi on Spotify' searches and plays "
+            "it when Spotify is connected (otherwise I open the "
+            "web search), 'what's playing' tells you the current "
+            "track, and 'pause Spotify' or 'next song on Spotify' "
+            "work with the media keys, no setup needed. I can "
+            "also speak your daily briefing every morning at "
+            "8:00 — say 'turn off morning briefing' to stop "
+            "that, or 'set morning briefing to 7:30' to change "
+            "the time. And I can hide in the system tray — say "
+            "'minimize to tray' — then double-click the tray "
+            "icon, or say 'show the pill', to bring me back. "
+            "Press Ctrl+Alt+A anywhere to open the command box "
+            "— say 'set hotkey to ctrl shift h' to change it, "
+            "or 'turn off hotkey' to stop it. And once Google "
+            "Calendar is connected, say 'what's on my calendar "
+            "today' for your events — they are in the daily "
+            "briefing too. I also remember facts you tell me — "
+            "say 'remember that Nexture is my MERN stack project' "
+            "and later ask 'what stack does Nexture use', or "
+            "'list what you remember'. I have five personality "
+            "modes — say 'switch to Aura mode' or 'turn on silent "
+            "mode' — and a Focus Mode: 'start a 50-minute coding "
+            "session', 'start Pomodoro', 'how much time is "
+            "remaining', or 'end focus mode'."
         ), False
     if re.search(r"\b(hello|hi|hey)\b", cleaned):
         return "Hey! I'm AURA, your assistant. What can I do for you?", False

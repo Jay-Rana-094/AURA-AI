@@ -14,6 +14,9 @@ Parsing is separated from building, like the other packs:
 import re
 from datetime import datetime
 
+from aura.calendar import calendar_line
+from aura.weather import weather_line
+
 _TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -56,6 +59,26 @@ def build_briefing(memory, now: datetime | None = None) -> str:
         f"{_greeting(now)}. It's {_fmt_clock(now)} on "
         f"{now.strftime('%A, %B %d')}."
     ]
+
+    # Phase 9.1: one weather line when the fetch succeeds —
+    # cached, and silently omitted when offline or on error,
+    # so the briefing never carries a weather error message.
+    try:
+        line = weather_line()
+    except Exception:  # noqa: BLE001 - the briefing never breaks on weather
+        line = None
+    if line:
+        parts.append(line)
+
+    # Phase 9.2B: one calendar line, same rule — silently
+    # omitted when the calendar is not connected or the fetch
+    # fails, so the briefing never carries a calendar error.
+    try:
+        line = calendar_line()
+    except Exception:  # noqa: BLE001 - the briefing never breaks on calendar
+        line = None
+    if line:
+        parts.append(line)
 
     if overdue:
         items = "; ".join(

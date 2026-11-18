@@ -156,6 +156,13 @@ def main():
         {"kind": "note_add", "text": "दूध खरीदना है"}, mem
     )
     assert "save" in reply and len(mem.list_notes()) == 1, reply
+    # A secret-looking note is refused in Hindi mode too, and stores
+    # nothing — the earlier milk note is still the only one.
+    reply = execute_hindi_command(
+        {"kind": "note_add", "text": "mera password hunter2 hai"}, mem
+    )
+    assert "save nahi" in reply, reply
+    assert len(mem.list_notes()) == 1, reply
     reply = execute_hindi_command({"kind": "note_list"}, mem)
     assert "दूध" in reply, reply
     reply = execute_hindi_command(

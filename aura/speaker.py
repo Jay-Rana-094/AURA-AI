@@ -115,11 +115,15 @@ def has_hindi_voice() -> bool:
         return False
 
 
-def _powershell_script(text: str, language: str) -> str:
+def _powershell_script(text: str, language: str, rate: int = 175) -> str:
     """System.Speech script for ``text`` in ``language``.
 
     Hindi picks a hi-IN voice when one is installed; the try/catch
     keeps speech working (with the default voice) if none is found.
+    ``rate`` is words per minute (the personality modes' voice
+    rate); System.Speech takes -10..10, so it maps here with
+    175 WPM as 0 — the presets (165/175/180) land at -1/0/0,
+    a deliberately small nudge, never a chipmunk voice.
     """
     safe = text.replace("'", "''").replace("\r", " ").replace("\n", " ")
     voice = ""
@@ -127,9 +131,11 @@ def _powershell_script(text: str, language: str) -> str:
         voice = (
             "try { $s.SelectVoiceByCulture('hi-IN') } catch { }; "
         )
+    sapi_rate = max(-10, min(10, int((rate - 175) / 10)))
     return (
         "Add-Type -AssemblyName System.Speech; "
         "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+        f"$s.Rate = {sapi_rate}; "
         f"{voice}$s.Speak('{safe}') | Out-Null"
     )
 
@@ -285,7 +291,7 @@ class Speaker:
         returncode, stderr = self._run_hidden(
             [
                 "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                _powershell_script(text, self.language),
+                _powershell_script(text, self.language, self._rate),
             ]
         )
         if self._stop_requested.is_set():
@@ -308,7 +314,7 @@ class Speaker:
         with self._proc_lock:
             self._current_engine = engine
         try:
-            engine.setProperty("rate", 175)
+            engine.setProperty("rate", self._rate)
             engine.say(text)
             engine.runAndWait()
         finally:

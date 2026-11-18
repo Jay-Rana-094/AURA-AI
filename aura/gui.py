@@ -116,17 +116,22 @@ def _rounded_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
 
 class IslandGUI:
     def __init__(self, on_mic, on_engine_change, on_wake_toggle=None,
-                 on_control_center=None):
+                 on_control_center=None, on_state=None):
         """on_mic: called when the mic button is pressed.
         on_engine_change(engine): called with "offline", "google"
         or "whisper" (Phase 8B).
         on_wake_toggle(enabled): called when the wake button is tapped.
         on_control_center: called on a stationary double-click
-        (Phase 8A) — main.py opens the Control Center window."""
+        (Phase 8A) — main.py opens the Control Center window.
+        on_state(state, status): Phase 10.1 — called on every
+        set_state, so main.py can publish the pill's state to the
+        shared StateManager. A failing callback never breaks the
+        pill."""
         self.on_mic = on_mic
         self.on_engine_change = on_engine_change
         self.on_wake_toggle = on_wake_toggle
         self.on_control_center = on_control_center
+        self.on_state = on_state
         self._wake_on = False
         self._state = "idle"
         self._busy = False
@@ -403,6 +408,14 @@ class IslandGUI:
             elif state not in ("listening", "speaking"):
                 self._animating = False
                 self._set_bars(BAR_BASE)
+            # Phase 10.1: publish the state change to the shared
+            # bus (main.py's callback). Best effort — the pill
+            # never depends on it.
+            if self.on_state is not None:
+                try:
+                    self.on_state(state, status)
+                except Exception:  # noqa: BLE001, S110 - pill never breaks
+                    pass
         self.root.after(0, _apply)
 
     def _set_bars(self, heights):

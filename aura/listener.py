@@ -38,7 +38,7 @@ import wave
 import speech_recognition as sr
 
 from aura.models import HINDI_MODEL_CANDIDATES, pick_model_dir
-from aura.wakeword import contains_wake_word
+from aura.wakeword import contains_any_phrase, contains_wake_word
 
 # Phase 8B: the Whisper model. "small" is multilingual (English +
 # Hindi) and fits a 4–6 GB card (RTX 3050 6 GB) at float16; on CPU
@@ -418,13 +418,20 @@ class Listener:
                     pass
 
     # -- wake word ---------------------------------------------------------
-    def wait_for_wake_word(self, stop_event, wake_word: str = "aura"):
+    def wait_for_wake_word(self, stop_event, wake_word: str = "aura",
+                           extra_triggers=None):
         """Listen continuously until ``wake_word`` is heard.
 
         Always uses the offline Vosk engine, even if the command engine
         is set to Google — wake-word listening must never send audio
         anywhere. Returns (detected, error): detected is False when
         ``stop_event`` is set or the mic fails.
+
+        ``extra_triggers`` (barge-in fix, 2026-11-17): extra phrases
+        that count as a detection too — the barge listener passes
+        the stop phrases, so "stop" cuts speech the same way the
+        wake word does. The wake loop passes nothing, so saying
+        "stop" out of the blue never starts a voice turn.
         """
         if not self._load_vosk():
             return False, self._vosk_error or "Vosk is unavailable."
@@ -437,6 +444,12 @@ class Listener:
 
         recognizer = KaldiRecognizer(self._vosk_model, 16000)
         audio_queue: queue.Queue = queue.Queue()
+        extra = tuple(extra_triggers or ())
+
+        def _triggered(text: str) -> bool:
+            return contains_wake_word(
+                text, wake_word
+            ) or contains_any_phrase(text, extra)
 
         def _callback(in_data, _frame_count, _time_info, _status):
             audio_queue.put(bytes(in_data))
@@ -461,13 +474,13 @@ class Listener:
                     continue
                 if recognizer.AcceptWaveform(data):
                     text = json.loads(recognizer.Result()).get("text", "")
-                    if contains_wake_word(text, wake_word):
+                    if _triggered(text):
                         return True, ""
                 else:
                     partial = json.loads(recognizer.PartialResult()).get(
                         "partial", ""
                     )
-                    if contains_wake_word(partial, wake_word):
+                    if _triggered(partial):
                         return True, ""
             return False, ""
         except OSError:

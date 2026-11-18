@@ -8,6 +8,13 @@ PyAudio==0.2.14              # Microphone access (Windows wheels available on Py
 requests==2.32.3             # Used by later phases (web info); harmless in phase 1
 psutil==6.1.0                # Phase 8A: live CPU / RAM / disk / battery telemetry
 faster-whisper==1.2.1        # Phase 8B: Whisper speech engine (GPU on RTX 3050, CPU fallback)
+GPUtil==1.4.0                 # Phase 9.1: GPU load / VRAM / temperature in Diagnostics
+pystray==0.19.5               # Phase 9.2A: system tray icon (Windows backend, ctypes)
+Pillow==11.3.0                # Phase 9.2A: tray icon image (required by pystray)
+pynput==1.8.2                 # Phase 9.2B: global hotkey (Windows low-level hook, no admin)
+google-api-python-client==2.202.0  # Phase 9.2B: Google Calendar API (read-only)
+google-auth-oauthlib==1.5.0   # Phase 9.2B: one-time Calendar login (calendar_setup.py)
+google-auth-httplib2==0.4.4   # Phase 9.2B: authorized HTTP for the Calendar API
 # Phase 8B GPU libraries (Windows + Linux, x86_64): cuBLAS + cuDNN 9
 # for CUDA 12. ctranslate2 loads these at runtime; without them the
 # Whisper engine falls back to CPU automatically.

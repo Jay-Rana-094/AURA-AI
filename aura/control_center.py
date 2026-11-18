@@ -32,7 +32,9 @@ a plain view over the running app.
 
     ControlCenter(parent, memory, on_typed_command=..., on_theme=...,
                   on_engine_change=..., get_engine=...,
-                  get_whisper_info=..., on_close=...)
+                  get_whisper_info=..., on_close=...,
+                  on_morning_change=..., get_morning_status=...,
+                  get_tray_status=...)
     refresh_all() / show_tab(name) / raise_window() / close()
     show_typed_reply(text)   # safe to call from a worker thread
 """
@@ -50,9 +52,39 @@ from aura.chat import (
     is_chat_enabled,
     set_chat_enabled,
 )
+from aura.morning import (
+    DEFAULT_BRIEFING_TIME,
+    format_briefing_time,
+    get_morning_time,
+    is_morning_enabled,
+    morning_status,
+    parse_briefing_time,
+    set_morning_enabled,
+    set_morning_time,
+)
+from aura.tray import tray_status
+from aura.calendar import calendar_status
 from aura.commands.briefing import build_briefing
+from aura.gpu import format_gpu_info, get_gpu_info
+from aura.hotkey import (
+    DEFAULT_HOTKEY_COMBO,
+    format_hotkey_combo,
+    get_hotkey_combo,
+    hotkey_status,
+    is_hotkey_enabled,
+    parse_hotkey_combo,
+    set_hotkey_combo,
+    set_hotkey_enabled,
+)
 from aura.language import load_language, save_language
 from aura.models import HINDI_MODEL_CANDIDATES, MODEL_CANDIDATES, pick_model_dir
+from aura.personality import (
+    PRESETS,
+    describe_mode,
+    load_mode,
+    personality_status,
+    save_mode,
+)
 from aura.speaker import has_hindi_voice
 from aura.theme import THEMES, load_theme_name, save_theme_name
 from aura.wake_settings import (
@@ -138,11 +170,26 @@ def format_telemetry(stats):
     return lines
 
 
+def telemetry_lines() -> list:
+    """The live system lines for the Diagnostics tab: psutil
+    stats plus the GPU (Phase 9.1). Both halves degrade
+    honestly on their own — a missing GPU never hides the CPU
+    numbers, and vice versa. Shared by the 2-second tick and
+    the Diagnostics refresh so the two never drift apart."""
+    return format_telemetry(get_telemetry()) + format_gpu_info(get_gpu_info())
+
+
 class ControlCenter:
     def __init__(self, parent, memory, *, on_typed_command,
                  on_theme, on_engine_change, get_engine, on_close=None,
                  get_whisper_info=None, on_chat_change=None,
-                 get_chat_status=None):
+                 get_chat_status=None, on_morning_change=None,
+                 get_morning_status=None, get_tray_status=None,
+                 on_hotkey_change=None, get_hotkey_status=None,
+                 on_hotkey_combo=None, get_calendar_status=None,
+                 on_personality_change=None,
+                 get_personality_status=None,
+                 get_state_status=None, get_focus_status=None):
         """parent: the pill's root window. memory: the Memory store.
         on_typed_command(text): main.py runs it through the brain.
         on_theme(name): main.py saves + recolors the pill.
@@ -154,6 +201,27 @@ class ControlCenter:
         on_chat_change(enabled): Phase 8C — main.py persists the
         chat-mode flag. get_chat_status(): chat_status(), or None
         for the default.
+        on_morning_change(enabled): Phase 9.2A — main.py persists
+        the morning-briefing flag. get_morning_status():
+        morning_status(), or None for the default.
+        get_tray_status(): Phase 9.2A — a dict {"available",
+        "running"} for the tray icon, or None for the default
+        (availability only, running False).
+        on_hotkey_change(enabled): Phase 9.2B — main.py persists
+        the hotkey flag and (re)binds the listener.
+        get_hotkey_status(): hotkey_status(), or None for the
+        default. on_hotkey_combo(combo): Phase 9.2B — main.py
+        persists the combo and rebinds the listener.
+        get_calendar_status(): calendar_status(), or None for
+        the default.
+        on_personality_change(mode): Phase 10.1 — main.py persists
+        the personality mode. get_personality_status():
+        personality_status(), or None for the default.
+        get_state_status(): Phase 10.1 — a dict {"state",
+        "status"} from the shared StateManager, or None for the
+        default (IDLE). get_focus_status(): Phase 10.1 — a dict
+        {"active", "status", "line", "on_break"} from the focus
+        manager, or None for the default (no session).
         on_close(): called (GUI thread) when the window closes."""
         self.memory = memory
         self.on_typed_command = on_typed_command
@@ -168,6 +236,60 @@ class ControlCenter:
         self.get_chat_status = (
             get_chat_status if get_chat_status is not None
             else chat_status
+        )
+        # Phase 9.2A: morning briefing + tray status, same shape
+        # as the chat-mode wiring above.
+        self.on_morning_change = (
+            on_morning_change if on_morning_change is not None
+            else set_morning_enabled
+        )
+        self.get_morning_status = (
+            get_morning_status if get_morning_status is not None
+            else morning_status
+        )
+        self.get_tray_status = (
+            get_tray_status if get_tray_status is not None
+            else tray_status
+        )
+        # Phase 9.2B: global hotkey + Google Calendar, same
+        # shape as the morning/tray wiring above. The combo
+        # callback has no safe default that rebinds the
+        # listener — the fallback only persists it (main.py
+        # always passes the real one).
+        self.on_hotkey_change = (
+            on_hotkey_change if on_hotkey_change is not None
+            else set_hotkey_enabled
+        )
+        self.get_hotkey_status = (
+            get_hotkey_status if get_hotkey_status is not None
+            else hotkey_status
+        )
+        self.on_hotkey_combo = (
+            on_hotkey_combo if on_hotkey_combo is not None
+            else set_hotkey_combo
+        )
+        self.get_calendar_status = (
+            get_calendar_status if get_calendar_status is not None
+            else calendar_status
+        )
+        # Phase 10.1: personality modes + shared state + focus,
+        # same shape as the chat/morning wiring above.
+        self.on_personality_change = (
+            on_personality_change if on_personality_change is not None
+            else save_mode
+        )
+        self.get_personality_status = (
+            get_personality_status if get_personality_status is not None
+            else personality_status
+        )
+        self.get_state_status = (
+            get_state_status if get_state_status is not None
+            else (lambda: {"state": "IDLE", "status": None})
+        )
+        self.get_focus_status = (
+            get_focus_status if get_focus_status is not None
+            else (lambda: {"active": False, "status": "idle",
+                          "line": "", "on_break": False})
         )
         self.on_close = on_close
         self._alive = True
@@ -405,6 +527,30 @@ class ControlCenter:
         self.lang_msg = tk.Label(frame, text="", fg=DIM, bg=BG,
                                  font=("Segoe UI", 9), anchor="w")
         self.lang_msg.pack(fill="x")
+
+        # Phase 10.1: personality modes — five presets as data.
+        # A mode only changes tone, verbosity, voice rate and
+        # whether replies are spoken; it never changes what AURA
+        # is allowed to do. "Aura" is the mode named after AURA
+        # itself (the earlier working name "Jarvis" was replaced
+        # at Jay's word, 2026-11-17).
+        self._section(frame, "Personality")
+        self.personality_var = tk.StringVar(value=load_mode())
+        for code in ("aura", "professional", "minimal", "friendly",
+                     "silent"):
+            tk.Radiobutton(frame,
+                           text=f"{PRESETS[code]['label']} — "
+                           f"{PRESETS[code]['style']}",
+                           variable=self.personality_var,
+                           value=code,
+                           command=self._change_personality,
+                           bg=BG, fg=TEXT, selectcolor=PANEL,
+                           activebackground=BG, font=("Segoe UI", 10),
+                           anchor="w").pack(fill="x")
+        self.personality_msg = tk.Label(
+            frame, text=self._personality_status_line(),
+            fg=DIM, bg=BG, font=("Segoe UI", 9), anchor="w")
+        self.personality_msg.pack(fill="x")
         self._section(frame, "Speech engine")
         self.engine_var = tk.StringVar(value=self.get_engine())
         # Phase 8B adds "whisper" — Faster-Whisper on the GPU.
@@ -433,6 +579,84 @@ class ControlCenter:
                                  fg=DIM, bg=BG, font=("Segoe UI", 9),
                                  anchor="w")
         self.chat_msg.pack(fill="x")
+        # Phase 9.2A: morning briefing — on by default, spoken once
+        # each morning at the time below. The time entry takes
+        # "7:30" or "7:30 AM" (bare 1-12 hours read as AM).
+        self._section(frame, "Morning briefing")
+        self.morning_var = tk.BooleanVar(
+            value=is_morning_enabled())
+        tk.Checkbutton(
+            frame,
+            text="Speak the daily briefing every morning",
+            variable=self.morning_var, command=self._change_morning,
+            bg=BG, fg=TEXT, selectcolor=PANEL,
+            activebackground=BG, font=("Segoe UI", 10),
+            anchor="w").pack(fill="x")
+        row = tk.Frame(frame, bg=BG)
+        row.pack(fill="x")
+        self.morning_entry = tk.Entry(row, bg=INPUT_BG, fg=TEXT,
+                                      relief="flat", bd=0,
+                                      font=("Segoe UI", 10), width=10)
+        self.morning_entry.insert(0, get_morning_time())
+        self.morning_entry.pack(side="left", ipady=3)
+        tk.Button(row, text="Set time", command=self._save_morning_time,
+                  bg=self._theme["control"], fg=self._theme["label"],
+                  activebackground="#1e1e5e", relief="flat", bd=0,
+                  font=("Segoe UI", 9), padx=10).pack(side="left",
+                                                       padx=(6, 0))
+        self.morning_msg = tk.Label(
+            frame, text=self._morning_status_line(),
+            fg=DIM, bg=BG, font=("Segoe UI", 9), anchor="w")
+        self.morning_msg.pack(fill="x")
+        # Phase 9.2A: system tray — read-only status. The icon
+        # itself is driven from the pill menu / voice ("minimize
+        # to tray") and its own menu (Show / Hide / Briefing /
+        # Quit); this line just says whether it is up.
+        self._section(frame, "System tray")
+        self.tray_msg = tk.Label(frame, text=self._tray_status_line(),
+                                 fg=DIM, bg=BG, font=("Segoe UI", 9),
+                                 anchor="w")
+        self.tray_msg.pack(fill="x")
+        # Phase 9.2B: global hotkey — on by default, Ctrl+Alt+A.
+        # The entry takes "ctrl+alt+a" or "ctrl shift h" (a
+        # modifier plus one key — a bare letter is refused, or
+        # it would hijack normal typing).
+        self._section(frame, "Global hotkey")
+        self.hotkey_var = tk.BooleanVar(
+            value=is_hotkey_enabled())
+        tk.Checkbutton(
+            frame,
+            text="Open the command box from anywhere on the PC",
+            variable=self.hotkey_var, command=self._change_hotkey,
+            bg=BG, fg=TEXT, selectcolor=PANEL,
+            activebackground=BG, font=("Segoe UI", 10),
+            anchor="w").pack(fill="x")
+        row = tk.Frame(frame, bg=BG)
+        row.pack(fill="x")
+        self.hotkey_entry = tk.Entry(row, bg=INPUT_BG, fg=TEXT,
+                                     relief="flat", bd=0,
+                                     font=("Segoe UI", 10), width=16)
+        self.hotkey_entry.insert(
+            0, format_hotkey_combo(get_hotkey_combo()))
+        self.hotkey_entry.pack(side="left", ipady=3)
+        tk.Button(row, text="Set hotkey", command=self._save_hotkey_combo,
+                  bg=self._theme["control"], fg=self._theme["label"],
+                  activebackground="#1e1e5e", relief="flat", bd=0,
+                  font=("Segoe UI", 9), padx=10).pack(side="left",
+                                                       padx=(6, 0))
+        self.hotkey_msg = tk.Label(
+            frame, text=self._hotkey_status_line(),
+            fg=DIM, bg=BG, font=("Segoe UI", 9), anchor="w")
+        self.hotkey_msg.pack(fill="x")
+        # Phase 9.2B: Google Calendar — read-only status. The
+        # connection itself is a one-time setup on the PC (run
+        # calendar_setup.py); this line just says whether it is
+        # connected, so a missing calendar is never a surprise.
+        self._section(frame, "Google Calendar")
+        self.calendar_msg = tk.Label(
+            frame, text=self._calendar_status_line(),
+            fg=DIM, bg=BG, font=("Segoe UI", 9), anchor="w")
+        self.calendar_msg.pack(fill="x")
         self._section(frame, "Window")
         self.topmost_var = tk.BooleanVar(value=False)
         tk.Checkbutton(frame, text="Keep the Control Center on top",
@@ -516,6 +740,47 @@ class ControlCenter:
                 self.chat_msg.configure(text=self._chat_status_line())
             except Exception:  # noqa: BLE001, S110 - best effort
                 pass
+            # Phase 9.2A: same for the morning-briefing checkbox +
+            # time, and the tray status line.
+            try:
+                status = self.get_morning_status()
+                self.morning_var.set(status["enabled"])
+                self.morning_entry.delete(0, tk.END)
+                self.morning_entry.insert(0, status["time"])
+                self.morning_msg.configure(
+                    text=self._morning_status_line())
+            except Exception:  # noqa: BLE001, S110 - best effort
+                pass
+            try:
+                self.tray_msg.configure(text=self._tray_status_line())
+            except Exception:  # noqa: BLE001, S110 - best effort
+                pass
+            # Phase 9.2B: same for the hotkey checkbox + combo
+            # and the calendar status line.
+            try:
+                status = self.get_hotkey_status()
+                self.hotkey_var.set(status["enabled"])
+                self.hotkey_entry.delete(0, tk.END)
+                self.hotkey_entry.insert(
+                    0, format_hotkey_combo(status["combo"]))
+                self.hotkey_msg.configure(
+                    text=self._hotkey_status_line())
+            except Exception:  # noqa: BLE001, S110 - best effort
+                pass
+            try:
+                self.calendar_msg.configure(
+                    text=self._calendar_status_line())
+            except Exception:  # noqa: BLE001, S110 - best effort
+                pass
+            # Phase 10.1: same for the personality radios, so a
+            # voice/typed switch shows here without reopening.
+            try:
+                status = self.get_personality_status()
+                self.personality_var.set(status["mode"])
+                self.personality_msg.configure(
+                    text=self._personality_status_line())
+            except Exception:  # noqa: BLE001, S110 - best effort
+                pass
             self._refresh_tab(self._current_tab)
         except Exception:  # noqa: BLE001 - best effort
             pass
@@ -524,6 +789,13 @@ class ControlCenter:
         text = build_briefing(self.memory)
         unread = self.memory.unread_notification_count()
         text += f"\n\nUnread notifications: {unread}."
+        # Phase 10.1: a live focus session shows here too.
+        try:
+            fstatus = self.get_focus_status()
+            if fstatus["active"]:
+                text += f"\n{fstatus['line']}."
+        except Exception:  # noqa: BLE001, S110 - Today never breaks
+            pass
         self._set_text(self.today_box, text)
 
     def _refresh_lists(self):
@@ -566,8 +838,7 @@ class ControlCenter:
         self._refresh_history()
 
     def _refresh_diagnostics(self):
-        self._set_text(self.telemetry_box,
-                       "\n".join(format_telemetry(get_telemetry())))
+        self._set_text(self.telemetry_box, "\n".join(telemetry_lines()))
         model = pick_model_dir(MODEL_CANDIDATES)
         hindi_model = pick_model_dir(HINDI_MODEL_CANDIDATES)
         lines = [
@@ -608,6 +879,66 @@ class ControlCenter:
                 f"model {status['model']}")
         except Exception:  # noqa: BLE001 - diagnostics never break
             lines.append("Chat fallback (Groq): status unavailable")
+        # Phase 9.2A: morning briefing + tray status.
+        try:
+            status = self.get_morning_status()
+            fired = status["last_fired"] or "never"
+            lines.append(
+                f"Morning briefing: "
+                f"{'on' if status['enabled'] else 'off'}, "
+                f"at {status['time_display']}, last fired {fired}")
+        except Exception:  # noqa: BLE001 - diagnostics never break
+            lines.append("Morning briefing: status unavailable")
+        try:
+            tstatus = self.get_tray_status()
+            lines.append(
+                f"System tray: "
+                f"{'available' if tstatus['available'] else 'NOT AVAILABLE'}, "
+                f"{'running' if tstatus['running'] else 'not running'}")
+        except Exception:  # noqa: BLE001 - diagnostics never break
+            lines.append("System tray: status unavailable")
+        # Phase 9.2B: global hotkey + Google Calendar status.
+        try:
+            hstatus = self.get_hotkey_status()
+            lines.append(
+                f"Global hotkey: "
+                f"{'on' if hstatus['enabled'] else 'off'}, "
+                f"{hstatus['combo_display']}, "
+                f"{'available' if hstatus['available'] else 'NOT AVAILABLE'}, "
+                f"{'running' if hstatus['running'] else 'not running'}")
+        except Exception:  # noqa: BLE001 - diagnostics never break
+            lines.append("Global hotkey: status unavailable")
+        try:
+            cstatus = self.get_calendar_status()
+            if not cstatus["available"]:
+                lines.append(
+                    "Google Calendar: NOT AVAILABLE "
+                    "(pip install -r requirements.txt)")
+            elif not cstatus["configured"]:
+                lines.append(
+                    "Google Calendar: not connected "
+                    "(run calendar_setup.py)")
+            else:
+                lines.append("Google Calendar: connected")
+        except Exception:  # noqa: BLE001 - diagnostics never break
+            lines.append("Google Calendar: status unavailable")
+        # Phase 10.1: shared state + focus status.
+        try:
+            sstatus = self.get_state_status()
+            line = f"State: {sstatus['state']}"
+            if sstatus.get("status"):
+                line += f" — {sstatus['status']}"
+            lines.append(line)
+        except Exception:  # noqa: BLE001 - diagnostics never break
+            lines.append("State: status unavailable")
+        try:
+            fstatus = self.get_focus_status()
+            if fstatus["active"]:
+                lines.append(fstatus["line"])
+            else:
+                lines.append("Focus: no session running")
+        except Exception:  # noqa: BLE001 - diagnostics never break
+            lines.append("Focus: status unavailable")
         lines += [
             f"Language: {'Hinglish' if load_language() == 'hi' else 'English'}",
             f"Hindi voice available: {'yes' if has_hindi_voice() else 'no'}",
@@ -735,6 +1066,24 @@ class ControlCenter:
             else "English mode on.")
         self.header_sub.configure(text=self._header_sub_text())
 
+    def _change_personality(self):
+        """Phase 10.1: the Settings personality radio — persist
+        the mode and refresh the status line."""
+        try:
+            self.on_personality_change(self.personality_var.get())
+        except Exception:  # noqa: BLE001 - toggle never breaks the window
+            pass
+        self.personality_msg.configure(
+            text=self._personality_status_line())
+
+    def _personality_status_line(self):
+        """Phase 10.1: one honest line about the current mode."""
+        try:
+            status = self.get_personality_status()
+            return status["description"]
+        except Exception:  # noqa: BLE001, S110 - status never breaks Settings
+            return describe_mode()
+
     def _change_engine(self):
         self.on_engine_change(self.engine_var.get())
         self.header_sub.configure(text=self._header_sub_text())
@@ -759,6 +1108,141 @@ class ControlCenter:
         except Exception:  # noqa: BLE001 - toggle never breaks the window
             pass
         self.chat_msg.configure(text=self._chat_status_line())
+
+    def _morning_status_line(self):
+        """One line under the morning-briefing controls: on/off,
+        time, and when it last fired."""
+        try:
+            status = self.get_morning_status()
+        except Exception:  # noqa: BLE001 - status never breaks Settings
+            status = {"enabled": True, "time": DEFAULT_BRIEFING_TIME,
+                      "time_display": "8:00 AM", "last_fired": None}
+        if not status["enabled"]:
+            return "Morning briefing is off."
+        fired = status.get("last_fired")
+        fired_note = (f" Last fired {fired}."
+                      if fired else " Hasn't fired yet.")
+        return (f"On, at {status['time_display']} every morning."
+                f"{fired_note}")
+
+    def _change_morning(self):
+        try:
+            self.on_morning_change(self.morning_var.get())
+        except Exception:  # noqa: BLE001 - toggle never breaks the window
+            pass
+        self.morning_msg.configure(text=self._morning_status_line())
+
+    def _save_morning_time(self):
+        raw = self.morning_entry.get().strip()
+        parsed = parse_briefing_time(raw)
+        if parsed is None:
+            self.morning_msg.configure(
+                text="That time didn't parse — try 7:30 or 7:30 AM.")
+            return
+        try:
+            set_morning_time(parsed)
+        except ValueError:  # noqa: BLE001 - bad time, say so
+            self.morning_msg.configure(
+                text="That time didn't parse — try 7:30 or 7:30 AM.")
+            return
+        # Setting a time re-enables the briefing, same as the voice
+        # command does — a time with the feature off would be a
+        # silent no-op.
+        if not is_morning_enabled():
+            set_morning_enabled(True)
+            self.morning_var.set(True)
+        self.morning_entry.delete(0, tk.END)
+        self.morning_entry.insert(0, parsed)
+        self.morning_msg.configure(text=self._morning_status_line())
+
+    def _tray_status_line(self):
+        """One line under the tray section: available / running."""
+        try:
+            status = self.get_tray_status()
+        except Exception:  # noqa: BLE001 - status never breaks Settings
+            status = {"available": False, "running": False}
+        if not status["available"]:
+            return ("Tray icon: not available — "
+                    "pip install -r requirements.txt")
+        return ("Tray icon: available, "
+                f"{'running' if status['running'] else 'not running'}")
+
+    def _hotkey_status_line(self):
+        """One line under the hotkey controls: on/off, combo,
+        and whether the listener is actually running."""
+        try:
+            status = self.get_hotkey_status()
+        except Exception:  # noqa: BLE001 - status never breaks Settings
+            status = {"enabled": True,
+                      "combo": DEFAULT_HOTKEY_COMBO,
+                      "combo_display": format_hotkey_combo(
+                          DEFAULT_HOTKEY_COMBO),
+                      "available": False, "running": False}
+        if not status["available"]:
+            return ("Hotkey: not available — "
+                    "pip install -r requirements.txt")
+        if not status["enabled"]:
+            return "Hotkey is off."
+        running = ("listening" if status["running"]
+                   else "not listening — restart AURA")
+        return (f"On: {status['combo_display']} opens the command "
+                f"box. ({running})")
+
+    def _change_hotkey(self):
+        try:
+            self.on_hotkey_change(self.hotkey_var.get())
+        except Exception:  # noqa: BLE001 - toggle never breaks the window
+            pass
+        self.hotkey_msg.configure(text=self._hotkey_status_line())
+
+    def _save_hotkey_combo(self):
+        raw = self.hotkey_entry.get().strip()
+        parsed = parse_hotkey_combo(raw)
+        if parsed is None:
+            self.hotkey_msg.configure(
+                text="That hotkey didn't parse — try ctrl+alt+a "
+                "(a modifier plus one key).")
+            return
+        try:
+            self.on_hotkey_combo(parsed)
+        except ValueError:  # noqa: BLE001 - bad combo, say so
+            self.hotkey_msg.configure(
+                text="That hotkey didn't parse — try ctrl+alt+a "
+                "(a modifier plus one key).")
+            return
+        except Exception:  # noqa: BLE001 - toggle never breaks the window
+            pass
+        # Setting a combo re-enables the hotkey, same as the
+        # voice command does — a combo with the feature off
+        # would be a silent no-op. (main.py's callback does
+        # this too; the direct set here covers the fallback
+        # path, where the callback only persists the combo.)
+        if not is_hotkey_enabled():
+            set_hotkey_enabled(True)
+            self.hotkey_var.set(True)
+        self.hotkey_entry.delete(0, tk.END)
+        self.hotkey_entry.insert(0, format_hotkey_combo(parsed))
+        self.hotkey_msg.configure(text=self._hotkey_status_line())
+
+    def _calendar_status_line(self):
+        """One line under the calendar section: connected or
+        what is missing."""
+        try:
+            status = self.get_calendar_status()
+        except Exception:  # noqa: BLE001 - status never breaks Settings
+            status = {"available": False, "configured": False,
+                      "has_credentials": False, "has_token": False}
+        if not status["available"]:
+            return ("Calendar: not available — "
+                    "pip install -r requirements.txt")
+        if not status["has_credentials"]:
+            return ("Calendar: not connected — save "
+                    "google_credentials.json, then run "
+                    "calendar_setup.py")
+        if not status["has_token"]:
+            return ("Calendar: credentials saved, no login yet — "
+                    "run calendar_setup.py")
+        return "Calendar: connected — today's events are in the briefing."
 
     def _apply_topmost(self):
         self.window.attributes("-topmost", self.topmost_var.get())
@@ -801,7 +1285,7 @@ class ControlCenter:
             return
         if self._current_tab == "Diagnostics":
             self._set_text(self.telemetry_box,
-                           "\n".join(format_telemetry(get_telemetry())))
+                           "\n".join(telemetry_lines()))
         self._telemetry_job = self.window.after(
             TELEMETRY_INTERVAL_MS, self._tick_telemetry)
 
@@ -811,6 +1295,26 @@ class ControlCenter:
             self.window.deiconify()
             self.window.lift()
             self.window.focus_force()
+        except tk.TclError:
+            pass
+
+    def focus_command_box(self):
+        """Phase 9.2B: bring the window forward and put the
+        cursor in the typed-command box — this is what the
+        global hotkey does. Thread-safe: the focus runs on the
+        GUI thread. The command box sits at the bottom of
+        every tab, so no tab switch is needed."""
+        if not self._alive:
+            return
+        try:
+            self.window.after(0, self._focus_command_box_now)
+        except tk.TclError:
+            pass
+
+    def _focus_command_box_now(self):
+        try:
+            self.raise_window()
+            self.cmd_entry.focus_set()
         except tk.TclError:
             pass
 

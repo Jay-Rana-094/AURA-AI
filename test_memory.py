@@ -79,6 +79,13 @@ def main():
     reply, _ = handle("what are my notes")
     assert "don't have any notes" in reply, reply
 
+    # A secret-looking "remember that ..." is refused, never stored —
+    # not as a fact and not as a plain note either.
+    reply, _ = handle("remember that my password is hunter2")
+    assert "can't store" in reply.lower(), reply
+    reply, _ = handle("what are my notes")
+    assert "hunter2" not in reply, reply
+
     # --- Brain round-trip: todos ---
     handle("add buy milk to my todo list")
     reply, _ = handle("remind me to call mom")  # no time -> todo

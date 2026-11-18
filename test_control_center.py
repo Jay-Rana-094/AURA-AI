@@ -27,6 +27,20 @@ from aura.chat import set_settings_path as set_chat_settings_path
 from aura.commands.custom import CustomStore
 from aura.control_center import ControlCenter, format_telemetry, get_telemetry
 from aura.memory import Memory
+from aura.morning import (
+    get_morning_time,
+    is_morning_enabled,
+    set_morning_enabled,
+)
+from aura.morning import set_settings_path as set_morning_settings_path
+from aura.hotkey import (
+    get_hotkey_combo,
+    is_hotkey_enabled,
+    set_hotkey_enabled,
+)
+from aura.hotkey import set_settings_path as set_hotkey_settings_path
+from aura.personality import load_mode, save_mode
+from aura.personality import set_settings_path as set_personality_settings_path
 from aura.theme import THEMES, set_settings_path
 
 
@@ -46,6 +60,27 @@ def main():
     set_settings_path(os.path.join(tmp, "settings.json"))
     set_chat_settings_path(os.path.join(tmp, "settings.json"))
     set_chat_key_file_path(os.path.join(tmp, "groq_api_key.txt"))
+    # Phase 9.2A: the morning briefing reads the same temp file
+    # (different keys), so the real aura_settings.json is untouched.
+    set_morning_settings_path(os.path.join(tmp, "settings.json"))
+    # Phase 9.2B: the hotkey reads the same temp file too.
+    set_hotkey_settings_path(os.path.join(tmp, "settings.json"))
+    # Phase 10.1: the personality mode reads the same temp
+    # file too (different key), so the real settings stay put.
+    set_personality_settings_path(os.path.join(tmp, "settings.json"))
+    # Phase 9.2B: fake pynput so the hotkey reads as available
+    # (this VM has no pynput — the listener itself is main.py's
+    # job and is never started here, so it stays "not running").
+    import sys as _sys
+    import types as _types
+    _pynput_stub = _types.ModuleType("pynput")
+    _kb_stub = _types.ModuleType("pynput.keyboard")
+    _kb_stub.GlobalHotKeys = object
+    _pynput_stub.keyboard = _kb_stub
+    _sys.modules["pynput"] = _pynput_stub
+    _sys.modules["pynput.keyboard"] = _kb_stub
+    from aura.hotkey import _reset_cache as _reset_hotkey_cache
+    _reset_hotkey_cache()
     set_custom_store(CustomStore(os.path.join(tmp, "custom.json")))
     set_memory(Memory(":memory:"))
 
@@ -62,6 +97,36 @@ def main():
         assert 0 <= stats["ram_percent"] <= 100, stats
     else:
         assert "psutil" in lines[0], lines
+
+    # --- GPU (Phase 9.1): same honesty, one shared line set. -----
+    import sys
+    import types
+    from aura.control_center import telemetry_lines
+
+    class _FakeGPU:
+        name = "NVIDIA GeForce RTX 3050 6GB Laptop GPU"
+        load = 0.23
+        memoryUsed = 1536
+        memoryTotal = 6144
+        temperature = 54
+
+    stub = types.ModuleType("GPUtil")
+    stub.getGPUs = lambda: [_FakeGPU()]
+    sys.modules["GPUtil"] = stub
+    try:
+        lines = telemetry_lines()
+        assert any(line.startswith("GPU:") for line in lines), lines
+        assert any("23%" in line for line in lines), lines
+        assert any("1.5 GB of 6.0 GB" in line for line in lines), lines
+        assert any("54" in line for line in lines), lines
+    finally:
+        sys.modules.pop("GPUtil", None)
+    # Without GPUtil the GPU half degrades but the rest stays.
+    lines = telemetry_lines()
+    assert any(line.startswith("GPU:") for line in lines), lines
+    assert any("GPUtil" in line for line in lines), lines
+    if stats["available"]:
+        assert any(line.startswith("CPU:") for line in lines), lines
 
     # --- Voice routing: open / close, and custom phrases win. -----
     assert pop_gui_action() is None
@@ -136,6 +201,14 @@ def main():
         on_engine_change=lambda engine: None,
         get_engine=lambda: "offline",
         on_close=lambda: None,
+        # Phase 10.1: injected live state + focus, so the
+        # Diagnostics / Today lines are tested without main.py.
+        get_state_status=lambda: {"state": "SPEAKING",
+                                  "status": "Speaking..."},
+        get_focus_status=lambda: {"active": True, "status": "focus",
+                                  "line": "Focus: 15 minutes left "
+                                          "(Coding)",
+                                  "on_break": False},
     )
     try:
         assert cc.window.winfo_exists()
@@ -203,11 +276,14 @@ def main():
         diag = cc.diag_box.get("1.0", "end")
         assert "Engine: offline" in diag, diag
         assert f"Theme: {cc._theme_name}" in diag, diag
-        # Telemetry live-tick writes into the box.
+        # Telemetry live-tick writes into the box — CPU lines
+        # plus the Phase 9.1 GPU lines (or the honest
+        # "not installed" line when GPUtil is missing here).
         cc._tick_telemetry()
         root.update()
         tele = cc.telemetry_box.get("1.0", "end")
         assert tele.strip(), tele
+        assert "GPU:" in tele, tele
         # Engine switch from elsewhere (voice / pill menu / typed
         # command): refresh follows it — the Settings radio and
         # header must show the new engine without reopening the
@@ -237,6 +313,128 @@ def main():
         cc.show_tab("Diagnostics")
         diag = cc.diag_box.get("1.0", "end")
         assert "Chat fallback (Groq): on, key missing" in diag, diag
+        # Morning briefing (Phase 9.2A): checkbox follows the flag
+        # (ON by default), the status line names the time, the time
+        # entry saves (and re-enables when off), and a voice toggle
+        # refreshes it without reopening — same pattern as chat.
+        cc.show_tab("Settings")
+        assert cc.morning_var.get() is True, "briefing is ON by default"
+        assert "8:00 AM" in cc.morning_msg.cget("text")
+        assert cc.morning_entry.get() == "08:00"
+        cc.morning_var.set(False)
+        cc._change_morning()
+        assert is_morning_enabled() is False
+        assert "off" in cc.morning_msg.cget("text")
+        cc.morning_entry.delete(0, "end")
+        cc.morning_entry.insert(0, "7:30")
+        cc._save_morning_time()
+        assert get_morning_time() == "07:30"
+        assert is_morning_enabled() is True, "setting a time re-enables"
+        assert cc.morning_var.get() is True
+        assert "7:30 AM" in cc.morning_msg.cget("text")
+        cc.morning_entry.delete(0, "end")
+        cc.morning_entry.insert(0, "nonsense")
+        cc._save_morning_time()
+        assert "didn't parse" in cc.morning_msg.cget("text")
+        assert get_morning_time() == "07:30", "bad time must not save"
+        set_morning_enabled(False)
+        cc.refresh_all()
+        root.update()
+        assert cc.morning_var.get() is False
+        set_morning_enabled(True)
+        cc.refresh_all()
+        root.update()
+        assert cc.morning_var.get() is True
+        # System tray (Phase 9.2A): this VM has no pystray, so the
+        # status line says so honestly instead of pretending.
+        assert "not available" in cc.tray_msg.cget("text")
+        # Global hotkey (Phase 9.2B): checkbox follows the flag
+        # (ON by default), the combo entry saves (and re-enables
+        # when off), a bad combo is refused, and a direct flag
+        # change refreshes without reopening — same pattern as
+        # the morning briefing.
+        cc.show_tab("Settings")
+        assert cc.hotkey_var.get() is True, "hotkey is ON by default"
+        assert "Ctrl+Alt+A" in cc.hotkey_msg.cget("text")
+        assert cc.hotkey_entry.get() == "Ctrl+Alt+A"
+        cc.hotkey_var.set(False)
+        cc._change_hotkey()
+        assert is_hotkey_enabled() is False
+        assert "off" in cc.hotkey_msg.cget("text")
+        cc.hotkey_entry.delete(0, "end")
+        cc.hotkey_entry.insert(0, "ctrl shift h")
+        cc._save_hotkey_combo()
+        assert get_hotkey_combo() == "<ctrl>+<shift>+h"
+        assert is_hotkey_enabled() is True, "setting a combo re-enables"
+        assert cc.hotkey_var.get() is True
+        assert "Ctrl+Shift+H" in cc.hotkey_msg.cget("text")
+        cc.hotkey_entry.delete(0, "end")
+        cc.hotkey_entry.insert(0, "banana")
+        cc._save_hotkey_combo()
+        assert "didn't parse" in cc.hotkey_msg.cget("text")
+        assert get_hotkey_combo() == "<ctrl>+<shift>+h", \
+            "bad combo must not save"
+        set_hotkey_enabled(False)
+        cc.refresh_all()
+        root.update()
+        assert cc.hotkey_var.get() is False
+        set_hotkey_enabled(True)
+        cc.refresh_all()
+        root.update()
+        assert cc.hotkey_var.get() is True
+        # Google Calendar (Phase 9.2B): no credentials file on
+        # this VM, so the status line says so honestly — either
+        # "not connected" (libraries present) or "not
+        # available" (libraries missing), never "connected".
+        cal_text = cc.calendar_msg.cget("text")
+        assert ("not connected" in cal_text
+                or "not available" in cal_text), cal_text
+        # Personality modes (Phase 10.1): the radio follows the
+        # saved mode (Friendly by default), a click persists it
+        # and refreshes the status line, and a voice/typed switch
+        # refreshes the radio without reopening — same pattern
+        # as chat / the morning briefing.
+        cc.show_tab("Settings")
+        assert cc.personality_var.get() == "friendly", \
+            "Friendly is the default mode"
+        assert "Friendly" in cc.personality_msg.cget("text")
+        cc.personality_var.set("aura")
+        cc._change_personality()
+        assert load_mode() == "aura"
+        assert "Aura" in cc.personality_msg.cget("text")
+        save_mode("silent")
+        cc.refresh_all()
+        root.update()
+        assert cc.personality_var.get() == "silent"
+        assert "no spoken replies" in cc.personality_msg.cget("text")
+        save_mode("friendly")
+        cc.refresh_all()
+        root.update()
+        assert cc.personality_var.get() == "friendly"
+        # Diagnostics (Phase 10.1): the shared state and the
+        # live focus session show here, and the Today tab names
+        # the session too.
+        cc.show_tab("Diagnostics")
+        diag = cc.diag_box.get("1.0", "end")
+        assert "State: SPEAKING — Speaking..." in diag, diag
+        assert "Focus: 15 minutes left (Coding)" in diag, diag
+        cc.show_tab("Today")
+        today = cc.today_box.get("1.0", "end")
+        assert "Focus: 15 minutes left (Coding)" in today, today
+        # The hotkey's focus helper puts the cursor in the
+        # typed-command box (this is what Ctrl+Alt+A does).
+        cc.focus_command_box()
+        root.update()
+        assert cc.cmd_entry.focus_get() == cc.cmd_entry, \
+            "command box did not take focus"
+        cc.show_tab("Diagnostics")
+        diag = cc.diag_box.get("1.0", "end")
+        assert "Morning briefing: on, at 7:30 AM" in diag, diag
+        assert "last fired never" in diag, diag
+        assert "System tray: NOT AVAILABLE" in diag, diag
+        assert "Global hotkey: on, Ctrl+Shift+H, available, not running" in diag, diag
+        assert ("Google Calendar: not connected" in diag
+                or "Google Calendar: NOT AVAILABLE" in diag), diag
     finally:
         cc.close()
         assert not cc._alive

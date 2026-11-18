@@ -9,6 +9,19 @@ aura-speech.log
 # Groq API key for Phase 8C chat mode (one line, the key only).
 # Never commit this — it is a live secret, like a password.
 groq_api_key.txt
+# Spotify app credentials + login tokens (Phase 9.1).
+# spotify_credentials.json holds your app's Client ID + Secret;
+# spotify_token.json holds the login tokens from spotify_setup.py.
+# Both are live secrets — never commit them.
+spotify_credentials.json
+spotify_token.json
+# Google Calendar credentials + login tokens (Phase 9.2B).
+# google_credentials.json is the OAuth client downloaded from
+# Google Cloud Console; google_token.json holds the login
+# tokens from calendar_setup.py. Both are live secrets —
+# never commit them.
+google_credentials.json
+google_token.json
 # Python caches.
 __pycache__/
 *.pyc

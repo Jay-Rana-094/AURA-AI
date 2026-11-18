@@ -25,6 +25,8 @@ listed/cancelled separately ("list my recurring reminders",
 import re
 from datetime import datetime, timedelta
 
+from aura.memory import _looks_like_secret
+
 _WORD_NUMS = {
     "one": 1,
     "two": 2,
@@ -339,6 +341,8 @@ def execute_memory_command(cmd: dict, memory) -> str:
     kind = cmd["kind"]
 
     if kind == "note_add":
+        if _looks_like_secret(cmd["text"]):
+            return "I can't store passwords, tokens, or secret keys."
         memory.add_note(cmd["text"])
         return "Noted."
     if kind == "note_list":
